@@ -71,4 +71,20 @@ pub fn build(b: *std.Build) void {
         .root_module = line_buffer_test_mod,
     });
     test_step.dependOn(&b.addRunArtifact(line_buffer_tests).step);
+
+    // Layout system tests
+    const layout_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/layout.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    layout_test_mod.addImport("render_commands", b.createModule(.{
+        .root_source_file = b.path("src/render_commands.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const layout_tests = b.addTest(.{
+        .root_module = layout_test_mod,
+    });
+    test_step.dependOn(&b.addRunArtifact(layout_tests).step);
 }

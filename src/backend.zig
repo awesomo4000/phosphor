@@ -164,12 +164,12 @@ pub const TerminalBackend = struct {
 
     fn mapBoxStyle(style: BoxStyle) @import("tui.zig").BoxStyle {
         return switch (style) {
-            .square => .square,
-            .rounded => .rounded,
-            .single => .single,
-            .double => .double,
-            .dotted => .single,
-            .heavy => .single,
+            .square => .Single,
+            .rounded => .Rounded,
+            .single => .Single,
+            .double => .Double,
+            .dotted => .Single,
+            .heavy => .Single,
         };
     }
 

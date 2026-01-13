@@ -1,0 +1,431 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const render_commands = @import("render_commands.zig");
+const DrawCommand = render_commands.DrawCommand;
+
+/// Rectangle bounds for layout
+pub const Rect = struct {
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+
+    pub fn right(self: Rect) u16 {
+        return self.x + self.w;
+    }
+
+    pub fn bottom(self: Rect) u16 {
+        return self.y + self.h;
+    }
+};
+
+/// Layout direction
+pub const Direction = enum {
+    horizontal,
+    vertical,
+};
+
+/// How an element sizes along one axis
+pub const SizingAxis = union(enum) {
+    /// Fixed size in characters/rows
+    fixed: u16,
+
+    /// Fit to content with min/max bounds
+    fit: struct { min: u16 = 0, max: u16 = 65535 },
+
+    /// Grow to fill available space with min/max bounds
+    grow: struct { min: u16 = 0, max: u16 = 65535 },
+};
+
+/// Sizing for both axes
+pub const Sizing = struct {
+    w: SizingAxis = .{ .grow = .{} },
+    h: SizingAxis = .{ .grow = .{} },
+};
+
+/// Padding on all sides
+pub const Padding = struct {
+    left: u16 = 0,
+    right: u16 = 0,
+    top: u16 = 0,
+    bottom: u16 = 0,
+
+    pub fn all(size: u16) Padding {
+        return .{ .left = size, .right = size, .top = size, .bottom = size };
+    }
+
+    pub fn xy(v: u16, h: u16) Padding {
+        return .{ .left = h, .right = h, .top = v, .bottom = v };
+    }
+
+    pub fn horizontal(self: Padding) u16 {
+        return self.left + self.right;
+    }
+
+    pub fn vertical(self: Padding) u16 {
+        return self.top + self.bottom;
+    }
+};
+
+/// Interface for widgets that can be laid out
+pub const WidgetVTable = struct {
+    ptr: *anyopaque,
+
+    /// Given available width, what height does this widget prefer?
+    /// Used for text wrapping and content-based sizing.
+    getPreferredHeightFn: ?*const fn (ptr: *anyopaque, width: u16) u16 = null,
+
+    /// Render the widget into the given bounds
+    viewFn: *const fn (ptr: *anyopaque, bounds: Rect, allocator: Allocator) anyerror![]DrawCommand,
+
+    pub fn getPreferredHeight(self: WidgetVTable, width: u16) u16 {
+        if (self.getPreferredHeightFn) |f| {
+            return f(self.ptr, width);
+        }
+        return 1; // Default: single row
+    }
+
+    pub fn view(self: WidgetVTable, bounds: Rect, allocator: Allocator) ![]DrawCommand {
+        return self.viewFn(self.ptr, bounds, allocator);
+    }
+};
+
+/// A node in the layout tree
+pub const LayoutNode = struct {
+    /// How this node sizes within its parent
+    sizing: Sizing = .{},
+
+    /// Padding inside this node
+    padding: Padding = .{},
+
+    /// Gap between children
+    gap: u16 = 0,
+
+    /// Layout direction for children
+    direction: Direction = .vertical,
+
+    /// Content: either a widget (leaf) or children (branch)
+    content: Content,
+
+    pub const Content = union(enum) {
+        /// Leaf node with a widget
+        widget: WidgetVTable,
+
+        /// Branch node with children
+        children: []const LayoutNode,
+
+        /// Empty placeholder
+        empty,
+    };
+
+    /// Create a leaf node from a widget
+    pub fn leaf(widget: WidgetVTable) LayoutNode {
+        return .{ .content = .{ .widget = widget } };
+    }
+
+    /// Create a leaf node with sizing
+    pub fn leafSized(widget: WidgetVTable, sizing: Sizing) LayoutNode {
+        return .{ .sizing = sizing, .content = .{ .widget = widget } };
+    }
+
+    /// Create a branch node with children
+    pub fn branch(children: []const LayoutNode) LayoutNode {
+        return .{ .content = .{ .children = children } };
+    }
+
+    /// Create a vertical container
+    pub fn vbox(children: []const LayoutNode) LayoutNode {
+        return .{ .direction = .vertical, .content = .{ .children = children } };
+    }
+
+    /// Create a horizontal container
+    pub fn hbox(children: []const LayoutNode) LayoutNode {
+        return .{ .direction = .horizontal, .content = .{ .children = children } };
+    }
+};
+
+/// Calculate layout and render the tree
+pub fn renderTree(
+    node: *const LayoutNode,
+    bounds: Rect,
+    allocator: Allocator,
+) ![]DrawCommand {
+    var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+    errdefer commands.deinit(allocator);
+
+    try renderNode(node, bounds, allocator, &commands);
+
+    return commands.toOwnedSlice(allocator);
+}
+
+fn renderNode(
+    node: *const LayoutNode,
+    bounds: Rect,
+    allocator: Allocator,
+    commands: *std.ArrayListUnmanaged(DrawCommand),
+) !void {
+    // Apply padding to get content area
+    const content_bounds = Rect{
+        .x = bounds.x + node.padding.left,
+        .y = bounds.y + node.padding.top,
+        .w = bounds.w -| node.padding.horizontal(),
+        .h = bounds.h -| node.padding.vertical(),
+    };
+
+    switch (node.content) {
+        .widget => |widget| {
+            // Leaf: render the widget
+            const widget_commands = try widget.view(content_bounds, allocator);
+            defer allocator.free(widget_commands);
+            try commands.appendSlice(allocator, widget_commands);
+        },
+        .children => |children| {
+            // Branch: calculate child bounds and render each
+            const child_bounds = try calculateChildBounds(node, children, content_bounds, allocator);
+            defer allocator.free(child_bounds);
+
+            for (children, child_bounds) |*child, cb| {
+                try renderNode(child, cb, allocator, commands);
+            }
+        },
+        .empty => {},
+    }
+}
+
+/// Calculate bounds for each child based on sizing rules
+fn calculateChildBounds(
+    parent: *const LayoutNode,
+    children: []const LayoutNode,
+    available: Rect,
+    allocator: Allocator,
+) ![]Rect {
+    var bounds = try allocator.alloc(Rect, children.len);
+    errdefer allocator.free(bounds);
+
+    if (children.len == 0) return bounds;
+
+    const is_vertical = parent.direction == .vertical;
+    const total_gap = parent.gap * @as(u16, @intCast(children.len -| 1));
+    const available_main = if (is_vertical)
+        available.h -| total_gap
+    else
+        available.w -| total_gap;
+
+    // First pass: calculate fixed and fit sizes, count grow children
+    var fixed_total: u16 = 0;
+    var grow_count: u16 = 0;
+    var child_sizes = try allocator.alloc(u16, children.len);
+    defer allocator.free(child_sizes);
+
+    for (children, 0..) |*child, i| {
+        const sizing = if (is_vertical) child.sizing.h else child.sizing.w;
+        switch (sizing) {
+            .fixed => |size| {
+                child_sizes[i] = size;
+                fixed_total += size;
+            },
+            .fit => |fit| {
+                // Ask widget for preferred size
+                const preferred = getPreferredSize(child, available, is_vertical);
+                child_sizes[i] = std.math.clamp(preferred, fit.min, fit.max);
+                fixed_total += child_sizes[i];
+            },
+            .grow => {
+                child_sizes[i] = 0; // Will be calculated
+                grow_count += 1;
+            },
+        }
+    }
+
+    // Second pass: distribute remaining space to grow children
+    if (grow_count > 0) {
+        const remaining = available_main -| fixed_total;
+        const per_grow = remaining / grow_count;
+        var extra = remaining % grow_count;
+
+        for (children, 0..) |*child, i| {
+            const sizing = if (is_vertical) child.sizing.h else child.sizing.w;
+            if (sizing == .grow) {
+                const grow = sizing.grow;
+                var size = per_grow;
+                if (extra > 0) {
+                    size += 1;
+                    extra -= 1;
+                }
+                child_sizes[i] = std.math.clamp(size, grow.min, grow.max);
+            }
+        }
+    }
+
+    // Third pass: position children
+    var pos: u16 = if (is_vertical) available.y else available.x;
+
+    for (0..children.len) |i| {
+        if (is_vertical) {
+            bounds[i] = .{
+                .x = available.x,
+                .y = pos,
+                .w = available.w,
+                .h = child_sizes[i],
+            };
+        } else {
+            bounds[i] = .{
+                .x = pos,
+                .y = available.y,
+                .w = child_sizes[i],
+                .h = available.h,
+            };
+        }
+        pos += child_sizes[i] + parent.gap;
+    }
+
+    return bounds;
+}
+
+/// Get preferred size of a node along the main axis
+fn getPreferredSize(node: *const LayoutNode, available: Rect, is_vertical: bool) u16 {
+    switch (node.content) {
+        .widget => |widget| {
+            if (is_vertical) {
+                // For vertical layout, ask widget for height given width
+                return widget.getPreferredHeight(available.w);
+            } else {
+                // For horizontal, default to 1 (could add getPreferredWidth)
+                return 1;
+            }
+        },
+        .children => |children| {
+            // Sum children's preferred sizes
+            var total: u16 = 0;
+            for (children) |*child| {
+                total += getPreferredSize(child, available, is_vertical);
+            }
+            const gaps = node.gap * @as(u16, @intCast(children.len -| 1));
+            return total + gaps + node.padding.vertical();
+        },
+        .empty => return 0,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────
+
+test "vertical layout with fixed sizes" {
+    const allocator = std.testing.allocator;
+
+    // Mock widget that just returns empty commands
+    const mock_view = struct {
+        fn view(_: *anyopaque, _: Rect, alloc: Allocator) ![]DrawCommand {
+            return try alloc.alloc(DrawCommand, 0);
+        }
+    }.view;
+
+    var dummy: u8 = 0;
+    const widget = WidgetVTable{
+        .ptr = &dummy,
+        .viewFn = mock_view,
+    };
+
+    const layout = LayoutNode{
+        .direction = .vertical,
+        .content = .{ .children = &[_]LayoutNode{
+            .{ .sizing = .{ .h = .{ .fixed = 3 } }, .content = .{ .widget = widget } },
+            .{ .sizing = .{ .h = .{ .grow = .{} } }, .content = .{ .widget = widget } },
+            .{ .sizing = .{ .h = .{ .fixed = 5 } }, .content = .{ .widget = widget } },
+        } },
+    };
+
+    const available = Rect{ .x = 0, .y = 0, .w = 80, .h = 24 };
+
+    // Calculate bounds
+    const child_bounds = try calculateChildBounds(&layout, layout.content.children, available, allocator);
+    defer allocator.free(child_bounds);
+
+    // Header: fixed 3
+    try std.testing.expectEqual(@as(u16, 0), child_bounds[0].y);
+    try std.testing.expectEqual(@as(u16, 3), child_bounds[0].h);
+
+    // Middle: grows to fill (24 - 3 - 5 = 16)
+    try std.testing.expectEqual(@as(u16, 3), child_bounds[1].y);
+    try std.testing.expectEqual(@as(u16, 16), child_bounds[1].h);
+
+    // Footer: fixed 5
+    try std.testing.expectEqual(@as(u16, 19), child_bounds[2].y);
+    try std.testing.expectEqual(@as(u16, 5), child_bounds[2].h);
+}
+
+test "layout with gap" {
+    const allocator = std.testing.allocator;
+
+    const mock_view = struct {
+        fn view(_: *anyopaque, _: Rect, alloc: Allocator) ![]DrawCommand {
+            return try alloc.alloc(DrawCommand, 0);
+        }
+    }.view;
+
+    var dummy: u8 = 0;
+    const widget = WidgetVTable{
+        .ptr = &dummy,
+        .viewFn = mock_view,
+    };
+
+    const layout = LayoutNode{
+        .direction = .vertical,
+        .gap = 1,
+        .content = .{ .children = &[_]LayoutNode{
+            .{ .sizing = .{ .h = .{ .fixed = 3 } }, .content = .{ .widget = widget } },
+            .{ .sizing = .{ .h = .{ .grow = .{} } }, .content = .{ .widget = widget } },
+        } },
+    };
+
+    const available = Rect{ .x = 0, .y = 0, .w = 80, .h = 24 };
+
+    const child_bounds = try calculateChildBounds(&layout, layout.content.children, available, allocator);
+    defer allocator.free(child_bounds);
+
+    // Header at 0, height 3
+    try std.testing.expectEqual(@as(u16, 0), child_bounds[0].y);
+    try std.testing.expectEqual(@as(u16, 3), child_bounds[0].h);
+
+    // Content at 4 (3 + 1 gap), height 20 (24 - 3 - 1 gap)
+    try std.testing.expectEqual(@as(u16, 4), child_bounds[1].y);
+    try std.testing.expectEqual(@as(u16, 20), child_bounds[1].h);
+}
+
+test "horizontal layout" {
+    const allocator = std.testing.allocator;
+
+    const mock_view = struct {
+        fn view(_: *anyopaque, _: Rect, alloc: Allocator) ![]DrawCommand {
+            return try alloc.alloc(DrawCommand, 0);
+        }
+    }.view;
+
+    var dummy: u8 = 0;
+    const widget = WidgetVTable{
+        .ptr = &dummy,
+        .viewFn = mock_view,
+    };
+
+    const layout = LayoutNode{
+        .direction = .horizontal,
+        .content = .{ .children = &[_]LayoutNode{
+            .{ .sizing = .{ .w = .{ .fixed = 20 } }, .content = .{ .widget = widget } },
+            .{ .sizing = .{ .w = .{ .grow = .{} } }, .content = .{ .widget = widget } },
+        } },
+    };
+
+    const available = Rect{ .x = 0, .y = 0, .w = 80, .h = 24 };
+
+    const child_bounds = try calculateChildBounds(&layout, layout.content.children, available, allocator);
+    defer allocator.free(child_bounds);
+
+    // Sidebar: fixed 20
+    try std.testing.expectEqual(@as(u16, 0), child_bounds[0].x);
+    try std.testing.expectEqual(@as(u16, 20), child_bounds[0].w);
+
+    // Content: grows to fill (80 - 20 = 60)
+    try std.testing.expectEqual(@as(u16, 20), child_bounds[1].x);
+    try std.testing.expectEqual(@as(u16, 60), child_bounds[1].w);
+}

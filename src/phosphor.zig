@@ -27,5 +27,16 @@ pub const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const Widget = runtime.Widget;
 
+// Layout system (flexbox-style)
+pub const layout = @import("layout.zig");
+pub const LayoutNode = layout.LayoutNode;
+pub const Rect = layout.Rect;
+pub const Sizing = layout.Sizing;
+pub const SizingAxis = layout.SizingAxis;
+pub const Padding = layout.Padding;
+pub const Direction = layout.Direction;
+pub const WidgetVTable = layout.WidgetVTable;
+pub const renderTree = layout.renderTree;
+
 // Version info
 pub const version = "0.1.0";
