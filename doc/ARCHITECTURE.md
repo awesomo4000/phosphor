@@ -188,6 +188,104 @@ Runtime receives Cmd
     → Msg sent back to widgets
 ```
 
+### Runtime Effect Management
+
+The runtime maintains a registry of effect handlers:
+
+```zig
+const Runtime = struct {
+    handlers: std.AutoHashMap(CmdTag, Handler),
+    subscriptions: std.ArrayList(Subscription),
+    widgets: []Widget,
+
+    pub fn init(allocator: Allocator) Runtime {
+        return .{
+            .handlers = std.AutoHashMap(CmdTag, Handler).init(allocator),
+            .subscriptions = std.ArrayList(Subscription).init(allocator),
+            .widgets = &.{},
+        };
+    }
+
+    /// Register a handler for a command type
+    pub fn onCmd(self: *Runtime, cmd_tag: CmdTag, handler: Handler) void {
+        self.handlers.put(cmd_tag, handler);
+    }
+
+    /// Process commands returned by widget updates
+    pub fn processCmd(self: *Runtime, cmd: Cmd) ?Msg {
+        const tag = std.meta.activeTag(cmd);
+        if (self.handlers.get(tag)) |handler| {
+            return handler.execute(cmd);
+        }
+        return null;
+    }
+};
+```
+
+### Async Results
+
+Commands that perform async operations (file IO, network requests) return results as messages:
+
+```zig
+// Handler produces a message when work completes
+fn loadFileHandler(ctx: *Runtime, filename: []const u8) ?Msg {
+    const contents = std.fs.cwd().readFileAlloc(ctx.allocator, filename, 1024 * 1024) catch |err| {
+        return .{ .file_error = err };
+    };
+    return .{ .file_loaded = .{ .filename = filename, .contents = contents } };
+}
+
+// Widget receives the result in next update cycle
+pub fn update(self: *Editor, msg: Msg) UpdateResult {
+    switch (msg) {
+        .file_loaded => |data| {
+            self.buffer.setText(data.contents);
+            return .{};
+        },
+        .file_error => |err| {
+            self.status = .{ .error = err };
+            return .{};
+        },
+        // ...
+    }
+}
+```
+
+### Batch Commands
+
+Widgets can return multiple commands using `Cmd.batch`:
+
+```zig
+pub fn update(self: *App, msg: Msg) UpdateResult {
+    switch (msg) {
+        .save_all => {
+            // Return multiple effects
+            return .{
+                .cmd = Cmd.batch(&.{
+                    .{ .save_file = "file1.txt" },
+                    .{ .save_file = "file2.txt" },
+                    .{ .log = "Saving all files..." },
+                }),
+            };
+        },
+        // ...
+    }
+}
+```
+
+### Command Categories
+
+Commands typically fall into these categories:
+
+| Category | Examples | Returns Msg? |
+|----------|----------|--------------|
+| Navigation | `.quit`, `.push_screen` | No |
+| File IO | `.save_file`, `.load_file` | Yes (async result) |
+| Clipboard | `.copy`, `.paste` | Paste returns Msg |
+| Network | `.http_get`, `.http_post` | Yes (async result) |
+| System | `.set_title`, `.bell` | No |
+| App-specific | `.add_todo`, `.delete_item` | Depends |
+
 ## Messages
 
 ```zig
@@ -261,6 +359,80 @@ const Spinner = struct {
 };
 ```
 
+## The Event Loop
+
+The runtime event loop ties everything together:
+
+```zig
+pub fn run(self: *Runtime) !void {
+    // Initial render
+    try self.render();
+
+    while (self.running) {
+        // 1. Poll for input events
+        const event = try self.backend.readEvent();
+        if (event == null) continue;
+
+        // 2. Convert to Msg
+        const msg = eventToMsg(event.?);
+
+        // 3. Collect subscriptions (determines who gets the event)
+        const subs = self.collectSubscriptions();
+
+        // 4. Dispatch to subscribed widgets
+        var cmds: std.ArrayList(Cmd) = .{};
+        var app_msgs: std.ArrayList(AppMsg) = .{};
+
+        for (self.widgets) |*widget| {
+            if (widget.isSubscribed(subs, msg)) {
+                const result = widget.update(msg);
+                if (result.cmd != .none) try cmds.append(result.cmd);
+                try app_msgs.appendSlice(result.messages);
+            }
+        }
+
+        // 5. Process commands (side effects)
+        for (cmds.items) |cmd| {
+            if (self.processCmd(cmd)) |result_msg| {
+                // Handler produced a message - queue for next cycle
+                try self.message_queue.append(result_msg);
+            }
+        }
+
+        // 6. Send app messages to app update function
+        for (app_msgs.items) |app_msg| {
+            try self.app_update(app_msg);
+        }
+
+        // 7. Re-render
+        try self.render();
+    }
+}
+
+fn render(self: *Runtime) !void {
+    // Collect views from all widgets
+    var nodes: std.ArrayList(LayoutNode) = .{};
+    for (self.widgets) |widget| {
+        if (widget.view()) |node| {
+            try nodes.append(node);
+        }
+    }
+
+    // Layout pass
+    const tree = buildLayoutTree(nodes.items);
+    const bounds = Rect{ .x = 0, .y = 0, .w = self.size.cols, .h = self.size.rows };
+
+    // Render pass
+    const commands = try renderTree(tree, bounds, self.frame_allocator);
+
+    // Execute on backend (differential rendering)
+    self.backend.execute(commands);
+
+    // Clear frame allocator for next frame
+    self.frame_arena.reset();
+}
+```
+
 ## Summary
 
 | Component | Pure/Impure | Responsibility |
@@ -271,3 +443,12 @@ const Spinner = struct {
 | Runtime event loop | Impure | Poll input, dispatch Msg |
 | Runtime cmd handlers | Impure | Execute side effects |
 | Runtime renderer | Impure | Draw to terminal |
+
+## Design Principles
+
+1. **Widgets are pure** - They only transform state and return descriptions of effects
+2. **Runtime is impure** - All IO, timers, and side effects happen here
+3. **Subscriptions are dynamic** - What events a widget wants depends on its state
+4. **Commands are data** - Effects are described, not performed
+5. **Handlers are registered** - App controls what effects are available
+6. **Messages flow one way** - Events → Widgets → Commands → Handlers → Messages
