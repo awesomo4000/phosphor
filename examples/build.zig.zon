@@ -1,0 +1,19 @@
+.{
+    .name = .phosphor_examples,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.1",
+    .fingerprint = 0x7192904456fb2627,
+
+    .dependencies = .{
+        .phosphor = .{
+            .path = "..",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "*.zig",
+        "thermite",
+    },
+}

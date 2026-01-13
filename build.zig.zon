@@ -1,0 +1,15 @@
+.{
+    .name = .phosphor,
+    .version = "0.1.0",
+    .fingerprint = 0x476e369788cc865f,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
