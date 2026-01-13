@@ -5,6 +5,7 @@ const phosphor = @import("phosphor");
 const DrawCommand = phosphor.DrawCommand;
 const Key = phosphor.Key;
 const LayoutNode = phosphor.LayoutNode;
+const Sub = phosphor.Sub;
 
 /// Segment kind - distinguishes typed input from pasted content
 pub const SegmentKind = enum {
@@ -60,6 +61,13 @@ pub const Repl = struct {
         self.buffer.deinit();
         self.history.deinit();
         self.segments.deinit(self.allocator);
+    }
+
+    /// Declare what events this widget wants to receive.
+    /// Runtime calls this to build event routing table.
+    pub fn subscriptions(self: *const Repl) []const Sub {
+        _ = self; // For now, always want these - could vary based on state later
+        return &.{ .keyboard, .paste };
     }
 
     /// Handle a key event, returns action to take

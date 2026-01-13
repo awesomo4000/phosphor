@@ -28,6 +28,11 @@ pub const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const Widget = runtime.Widget;
 
+// Elm-style Application
+pub const application = @import("application.zig");
+pub const Application = application.Application;
+pub const Sub = application.Sub;
+
 // Layout system (flexbox-style)
 pub const layout = @import("layout.zig");
 pub const LayoutNode = layout.LayoutNode;

@@ -12,6 +12,7 @@ const Rect = phosphor.Rect;
 const Text = phosphor.Text;
 const Sizing = phosphor.Sizing;
 const renderTree = phosphor.renderTree;
+const Sub = phosphor.Sub;
 
 const repl_mod = @import("repl");
 const Repl = repl_mod.Repl;
@@ -89,26 +90,53 @@ fn eventToMsg(event: Event) Msg {
     };
 }
 
+/// Check if a message matches any of the given subscriptions
+fn isSubscribed(subs: []const Sub, msg: Msg) bool {
+    for (subs) |sub| {
+        const matches = switch (sub) {
+            .keyboard => msg == .key,
+            .paste => msg == .paste_start or msg == .paste_end,
+            .resize => msg == .resize,
+            .tick_ms => msg == .tick,
+            .focus => false, // TODO: focus_gained/focus_lost messages
+        };
+        if (matches) return true;
+    }
+    return false;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Update - state transitions (as pure as possible)
 // ─────────────────────────────────────────────────────────────
 
+/// App-level update - receives high-level messages from widgets
+/// (This is what the app author writes)
 fn update(model: *Model, msg: Msg) !void {
     switch (msg) {
         .resize => |new_size| {
             model.size = new_size;
         },
-        .paste_start => {
-            model.repl.pasteStart();
-        },
-        .paste_end => {
-            model.repl.pasteEnd();
-        },
-        .key => |key| {
-            const action = try model.repl.handleKey(key);
-            try handleAction(model, action);
-        },
         .tick, .none => {},
+        // App doesn't handle key/paste directly - those go to widgets via runtime
+        else => {},
+    }
+}
+
+/// Route events to widgets based on subscriptions
+/// (This is runtime code - would live in Runtime struct)
+fn routeToWidgets(model: *Model, msg: Msg) !void {
+    // Check repl widget's subscriptions
+    const repl_subs = model.repl.subscriptions();
+    if (isSubscribed(repl_subs, msg)) {
+        switch (msg) {
+            .paste_start => model.repl.pasteStart(),
+            .paste_end => model.repl.pasteEnd(),
+            .key => |key| {
+                const action = try model.repl.handleKey(key);
+                try handleAction(model, action);
+            },
+            else => {},
+        }
     }
 }
 
@@ -584,6 +612,11 @@ pub fn main() !void {
         }
 
         const msg = eventToMsg(maybe_event.?);
+
+        // Runtime: route events to widgets based on subscriptions
+        try routeToWidgets(&model, msg);
+
+        // App: handle app-level messages (resize, etc.)
         try update(&model, msg);
 
         // Re-render full view using declarative approach
