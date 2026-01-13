@@ -60,11 +60,13 @@ pub fn enterRawMode(fd: i32) !void {
     // Turn off:
     // - ECHO: Don't echo input characters
     // - ICANON: Disable canonical mode (line buffering)
-    // - ISIG: Disable signals like CTRL+C (keeping this enabled for clean exit)
-    // - IXON: Disable software flow control
+    // - ISIG: Disable signals so Ctrl+C/Ctrl+Z are read as input
+    // - IEXTEN: Disable implementation-defined input processing (Ctrl+O, Ctrl+V, etc.)
+    // - IXON: Disable software flow control (Ctrl+S/Ctrl+Q)
     tios.lflag.ECHO = false;
     tios.lflag.ICANON = false;
-    tios.lflag.ISIG = true;  // Keep signals enabled for Ctrl+C
+    tios.lflag.ISIG = false; // Handle Ctrl+C ourselves
+    tios.lflag.IEXTEN = false; // Handle Ctrl+O, Ctrl+V ourselves
     tios.iflag.IXON = false;
     tios.iflag.ICRNL = false; // Don't translate CR to NL
     tios.oflag.OPOST = false; // Disable output processing

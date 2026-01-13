@@ -204,8 +204,9 @@ fn view(model: *const Model, allocator: std.mem.Allocator) !ViewResult {
     // Input area
     const input_result = try appendInput(&commands, &text_allocs, &model.repl, bounds.input_start, model.size.cols, allocator);
 
-    // Final cursor position and present
+    // Final cursor position, show cursor, and present
     try commands.append(allocator, .{ .move_cursor = .{ .x = input_result.cursor_x, .y = input_result.cursor_y } });
+    try commands.append(allocator, .{ .show_cursor = .{ .visible = true } });
     try commands.append(allocator, .flush);
 
     return .{

@@ -57,10 +57,14 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(self: *Renderer) void {
-        // Restore terminal - reset colors BEFORE clearing so we use default bg
+        // Restore terminal state
         terminal.resetColors(self.ttyfd) catch {};
         terminal.showCursor(self.ttyfd) catch {};
-        terminal.clearScreen(self.ttyfd) catch {};
+        // Move cursor to bottom of screen so user's terminal isn't cluttered
+        // Don't clear screen - user may want to see what was displayed
+        var buf: [32]u8 = undefined;
+        const seq = std.fmt.bufPrint(&buf, "\x1b[{};1H\n", .{self.term_height}) catch "";
+        _ = std.posix.write(self.ttyfd, seq) catch {};
         terminal.exitRawMode(self.ttyfd) catch {};
 
         self.front_plane.deinit();

@@ -615,11 +615,22 @@ pub const ThermiteBackend = struct {
                     self.current_bg = DEFAULT_COLOR;
                 },
                 .flush => {
-                    // Present on flush
+                    // Present the frame
                     self.present() catch {};
+                    // Move terminal cursor to the stored position
+                    var buf: [32]u8 = undefined;
+                    const seq = std.fmt.bufPrint(&buf, "\x1b[{};{}H", .{ self.cursor_y + 1, self.cursor_x + 1 }) catch return;
+                    _ = std.posix.write(self.renderer.ttyfd, seq) catch {};
                 },
-                .show_cursor => {
-                    // Thermite handles cursor separately
+                .show_cursor => |vis| {
+                    // Position terminal cursor at stored position before showing/hiding
+                    // This ensures cursor appears at the right place, not wherever terminal left it
+                    var pos_buf: [32]u8 = undefined;
+                    const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H", .{ self.cursor_y + 1, self.cursor_x + 1 }) catch return;
+                    _ = std.posix.write(self.renderer.ttyfd, pos_seq) catch {};
+
+                    const cursor_seq = if (vis.visible) "\x1b[?25h" else "\x1b[?25l";
+                    _ = std.posix.write(self.renderer.ttyfd, cursor_seq) catch {};
                 },
                 else => {},
             }
