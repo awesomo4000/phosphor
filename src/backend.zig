@@ -3,6 +3,11 @@ const render_commands = @import("render_commands.zig");
 const DrawCommand = render_commands.DrawCommand;
 const BoxStyle = render_commands.BoxStyle;
 
+// Thermite imports for ThermiteBackend
+const thermite = @import("thermite/root.zig");
+const ThermiteRenderer = thermite.Renderer;
+const ThermiteCell = thermite.Cell;
+
 /// Event types that backends produce
 pub const Event = union(enum) {
     key: Key,
@@ -37,6 +42,8 @@ pub const Key = union(enum) {
     ctrl_w,
     ctrl_left,
     ctrl_right,
+    shift_enter,
+    alt_enter,
     unknown,
 };
 
@@ -194,6 +201,13 @@ pub const TerminalBackend = struct {
 
 /// Read a key and convert to Event
 fn readKeyAsEvent() !?Event {
+    const tui = @import("tui.zig");
+
+    // Check for pending resize first (from SIGWINCH)
+    if (tui.checkResize()) |new_size| {
+        return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
+    }
+
     const stdin = std.fs.File.stdin();
     const posix = std.posix;
 
@@ -205,6 +219,10 @@ fn readKeyAsEvent() !?Event {
     }};
     const ready = try posix.poll(&pfd, 100);
     if (ready == 0) {
+        // Check for resize again after poll timeout
+        if (tui.checkResize()) |new_size| {
+            return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
+        }
         return null; // Timeout
     }
 
@@ -481,6 +499,201 @@ pub const MemoryBackend = struct {
 
     fn deinitImpl(ptr: *anyopaque) void {
         const self: *MemoryBackend = @ptrCast(@alignCast(ptr));
+        self.deinit();
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+// Thermite Backend - double-buffered differential rendering
+// ─────────────────────────────────────────────────────────────
+
+pub const ThermiteBackend = struct {
+    renderer: *ThermiteRenderer,
+    allocator: std.mem.Allocator,
+    cursor_x: u32,
+    cursor_y: u32,
+    current_fg: u32,
+    current_bg: u32,
+
+    pub fn init(allocator: std.mem.Allocator) !ThermiteBackend {
+        const tui = @import("tui.zig");
+
+        const renderer = try ThermiteRenderer.init(allocator);
+
+        // Install resize handler for SIGWINCH
+        tui.installResizeHandler();
+
+        return .{
+            .renderer = renderer,
+            .allocator = allocator,
+            .cursor_x = 0,
+            .cursor_y = 0,
+            .current_fg = 0xFFFFFF, // White
+            .current_bg = 0x000000, // Black
+        };
+    }
+
+    pub fn deinit(self: *ThermiteBackend) void {
+        self.renderer.deinit();
+    }
+
+    /// Handle terminal resize - reallocate planes for new size
+    pub fn resize(self: *ThermiteBackend, new_size: Size) !void {
+        const Plane = thermite.Plane;
+
+        // Create new planes with new size
+        const new_front = try Plane.init(self.allocator, new_size.cols, new_size.rows);
+        errdefer new_front.deinit();
+
+        const new_back = try Plane.init(self.allocator, new_size.cols, new_size.rows);
+        errdefer new_back.deinit();
+
+        // Free old planes
+        self.renderer.front_plane.deinit();
+        self.renderer.back_plane.deinit();
+
+        // Update renderer with new planes
+        self.renderer.front_plane = new_front;
+        self.renderer.back_plane = new_back;
+        self.renderer.term_width = new_size.cols;
+        self.renderer.term_height = new_size.rows;
+        self.renderer.first_frame = true; // Force full redraw
+
+        // Reset cursor
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+    }
+
+    pub fn backend(self: *ThermiteBackend) Backend {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .execute = executeImpl,
+                .readEvent = readEventImpl,
+                .getSize = getSizeImpl,
+                .deinit = deinitImpl,
+            },
+        };
+    }
+
+    /// Present the back buffer - call this after execute to show changes
+    pub fn present(self: *ThermiteBackend) !void {
+        try self.renderer.renderDifferential();
+    }
+
+    fn executeImpl(ptr: *anyopaque, cmds: []const DrawCommand) void {
+        const self: *ThermiteBackend = @ptrCast(@alignCast(ptr));
+
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .move_cursor => |pos| {
+                    self.cursor_x = pos.x;
+                    self.cursor_y = pos.y;
+                },
+                .draw_text => |text| {
+                    self.writeText(text.text);
+                },
+                .clear_screen => {
+                    self.renderer.clearBackBuffer();
+                    self.cursor_x = 0;
+                    self.cursor_y = 0;
+                },
+                .clear_line => {
+                    self.clearLine();
+                },
+                .set_color => |color| {
+                    if (color.fg) |fg| {
+                        self.current_fg = colorToRgb(fg);
+                    }
+                    if (color.bg) |bg| {
+                        self.current_bg = colorToRgb(bg);
+                    }
+                },
+                .reset_attributes => {
+                    self.current_fg = 0xFFFFFF;
+                    self.current_bg = 0x000000;
+                },
+                .flush => {
+                    // Present on flush
+                    self.present() catch {};
+                },
+                .show_cursor => {
+                    // Thermite handles cursor separately
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn writeText(self: *ThermiteBackend, text: []const u8) void {
+        for (text) |byte| {
+            if (byte == '\n') {
+                self.cursor_y += 1;
+                self.cursor_x = 0;
+                continue;
+            }
+
+            if (self.cursor_x < self.renderer.term_width and
+                self.cursor_y < self.renderer.term_height)
+            {
+                self.renderer.back_plane.setCell(self.cursor_x, self.cursor_y, .{
+                    .ch = byte,
+                    .fg = self.current_fg,
+                    .bg = self.current_bg,
+                });
+                self.cursor_x += 1;
+            }
+        }
+    }
+
+    fn clearLine(self: *ThermiteBackend) void {
+        if (self.cursor_y >= self.renderer.term_height) return;
+
+        var x = self.cursor_x;
+        while (x < self.renderer.term_width) : (x += 1) {
+            self.renderer.back_plane.setCell(x, self.cursor_y, ThermiteCell.init());
+        }
+    }
+
+    fn colorToRgb(color: render_commands.Color) u32 {
+        // Convert Color enum to RGB
+        return switch (color) {
+            .black => 0x000000,
+            .red => 0xAA0000,
+            .green => 0x00AA00,
+            .yellow => 0xAAAA00,
+            .blue => 0x0000AA,
+            .magenta => 0xAA00AA,
+            .cyan => 0x00AAAA,
+            .white => 0xAAAAAA,
+            .bright_black => 0x555555,
+            .bright_red => 0xFF5555,
+            .bright_green => 0x55FF55,
+            .bright_yellow => 0xFFFF55,
+            .bright_blue => 0x5555FF,
+            .bright_magenta => 0xFF55FF,
+            .bright_cyan => 0x55FFFF,
+            .bright_white => 0xFFFFFF,
+            .default => 0xAAAAAA,
+        };
+    }
+
+    fn readEventImpl(ptr: *anyopaque) anyerror!?Event {
+        _ = ptr;
+        // Use the shared key reading logic
+        return readKeyAsEvent();
+    }
+
+    fn getSizeImpl(ptr: *anyopaque) Size {
+        const self: *ThermiteBackend = @ptrCast(@alignCast(ptr));
+        return .{
+            .cols = @intCast(self.renderer.term_width),
+            .rows = @intCast(self.renderer.term_height),
+        };
+    }
+
+    fn deinitImpl(ptr: *anyopaque) void {
+        const self: *ThermiteBackend = @ptrCast(@alignCast(ptr));
         self.deinit();
     }
 };

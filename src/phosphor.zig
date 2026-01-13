@@ -21,6 +21,7 @@ pub const Key = backend.Key;
 pub const Size = backend.Size;
 pub const TerminalBackend = backend.TerminalBackend;
 pub const MemoryBackend = backend.MemoryBackend;
+pub const ThermiteBackend = backend.ThermiteBackend;
 
 // Runtime (event loop)
 pub const runtime = @import("runtime.zig");
@@ -37,6 +38,8 @@ pub const Padding = layout.Padding;
 pub const Direction = layout.Direction;
 pub const WidgetVTable = layout.WidgetVTable;
 pub const renderTree = layout.renderTree;
+pub const Text = layout.Text;
+pub const Spacer = layout.Spacer;
 
 // Version info
 pub const version = "0.1.0";

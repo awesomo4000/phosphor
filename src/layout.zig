@@ -75,6 +75,9 @@ pub const WidgetVTable = struct {
     /// Used for text wrapping and content-based sizing.
     getPreferredHeightFn: ?*const fn (ptr: *anyopaque, width: u16) u16 = null,
 
+    /// What width does this widget prefer (for horizontal fit sizing)?
+    getPreferredWidthFn: ?*const fn (ptr: *anyopaque) u16 = null,
+
     /// Render the widget into the given bounds
     viewFn: *const fn (ptr: *anyopaque, bounds: Rect, allocator: Allocator) anyerror![]DrawCommand,
 
@@ -83,6 +86,13 @@ pub const WidgetVTable = struct {
             return f(self.ptr, width);
         }
         return 1; // Default: single row
+    }
+
+    pub fn getPreferredWidth(self: WidgetVTable) u16 {
+        if (self.getPreferredWidthFn) |f| {
+            return f(self.ptr);
+        }
+        return 1; // Default: single column
     }
 
     pub fn view(self: WidgetVTable, bounds: Rect, allocator: Allocator) ![]DrawCommand {
@@ -290,8 +300,8 @@ fn getPreferredSize(node: *const LayoutNode, available: Rect, is_vertical: bool)
                 // For vertical layout, ask widget for height given width
                 return widget.getPreferredHeight(available.w);
             } else {
-                // For horizontal, default to 1 (could add getPreferredWidth)
-                return 1;
+                // For horizontal layout, ask widget for preferred width
+                return widget.getPreferredWidth();
             }
         },
         .children => |children| {
@@ -306,6 +316,49 @@ fn getPreferredSize(node: *const LayoutNode, available: Rect, is_vertical: bool)
         .empty => return 0,
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// Simple Text Widget
+// ─────────────────────────────────────────────────────────────
+
+/// A simple text widget for labels and headers
+pub const Text = struct {
+    text: []const u8,
+
+    pub fn init(text: []const u8) Text {
+        return .{ .text = text };
+    }
+
+    pub fn widget(self: *const Text) WidgetVTable {
+        return .{
+            .ptr = @constCast(@ptrCast(self)),
+            .getPreferredWidthFn = getPreferredWidth,
+            .viewFn = view,
+        };
+    }
+
+    fn getPreferredWidth(ptr: *anyopaque) u16 {
+        const self: *const Text = @ptrCast(@alignCast(ptr));
+        return @intCast(self.text.len);
+    }
+
+    fn view(ptr: *anyopaque, bounds: Rect, allocator: Allocator) ![]DrawCommand {
+        const self: *const Text = @ptrCast(@alignCast(ptr));
+        var commands = try allocator.alloc(DrawCommand, 2);
+        commands[0] = .{ .move_cursor = .{ .x = bounds.x, .y = bounds.y } };
+        // Truncate to fit bounds
+        const display_len = @min(self.text.len, bounds.w);
+        commands[1] = .{ .draw_text = .{ .text = self.text[0..display_len] } };
+        return commands;
+    }
+};
+
+/// A spacer that grows to fill available space
+pub const Spacer = struct {
+    pub fn node() LayoutNode {
+        return .{ .sizing = .{ .w = .{ .grow = .{} }, .h = .{ .grow = .{} } }, .content = .empty };
+    }
+};
 
 // ─────────────────────────────────────────────────────────────
 // Tests

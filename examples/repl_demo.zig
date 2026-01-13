@@ -1,230 +1,298 @@
 const std = @import("std");
 const phosphor = @import("phosphor");
 
-// Backend and Layout
 const Backend = phosphor.Backend;
-const TerminalBackend = phosphor.TerminalBackend;
+const ThermiteBackend = phosphor.ThermiteBackend;
 const Event = phosphor.Event;
+const Key = phosphor.Key;
 const DrawCommand = phosphor.DrawCommand;
-const Rect = phosphor.Rect;
+const Size = phosphor.Size;
 const LayoutNode = phosphor.LayoutNode;
-const layout = phosphor.layout;
+const Rect = phosphor.Rect;
+const Text = phosphor.Text;
+const Sizing = phosphor.Sizing;
+const renderTree = phosphor.renderTree;
 
-// Widgets
 const repl_mod = @import("repl");
 const Repl = repl_mod.Repl;
 const logview_mod = @import("logview");
 const LogView = logview_mod.LogView;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// ─────────────────────────────────────────────────────────────
+// Model - all application state in one place
+// ─────────────────────────────────────────────────────────────
 
-    // Initialize terminal backend
-    var term_backend = try TerminalBackend.init(allocator);
-    defer term_backend.deinit();
-    const backend = term_backend.backend();
+const Model = struct {
+    log: LogView,
+    repl: Repl,
+    size: Size,
+    running: bool,
+    allocator: std.mem.Allocator,
 
-    // Enable cursor, bracketed paste, set cursor color
-    backend.execute(&.{
-        .clear_screen,
-        .{ .show_cursor = .{ .visible = true } },
-    });
-
-    // Get initial size
-    var size = backend.getSize();
-
-    // Create widgets
-    var log = LogView.init(allocator, 1000);
-    defer log.deinit();
-
-    var repl = try Repl.init(allocator, .{
-        .prompt = "phosphor> ",
-    });
-    defer repl.deinit();
-
-    // Welcome messages
-    try log.append("Welcome to Phosphor REPL Demo!");
-    try log.append("Commands: help, clear, history, exit");
-    try log.append("Ctrl+O inserts newline for multiline input");
-    try log.append("");
-
-    // Layout configuration
+    // Layout config (could be in a separate Config struct)
     const header_height: u16 = 3;
     const min_log_lines: u16 = 3;
     const max_input_rows: u16 = 10;
-    var current_input_rows: u16 = 1;
 
-    // Initial render
-    try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
+    pub fn init(allocator: std.mem.Allocator, size: Size) !Model {
+        var log = LogView.init(allocator, 1000);
+        errdefer log.deinit();
 
-    // Main event loop
-    var running = true;
-    while (running) {
-        const maybe_event = try backend.readEvent();
-        if (maybe_event == null) continue;
+        var repl = try Repl.init(allocator, .{ .prompt = "phosphor> " });
+        errdefer repl.deinit();
 
-        const event = maybe_event.?;
+        // Welcome messages
+        try log.append("Welcome to Phosphor REPL Demo!");
+        try log.append("Commands: help, clear, history, exit");
+        try log.append("Ctrl+O inserts newline for multiline input");
+        try log.append("");
 
-        switch (event) {
-            .resize => |new_size| {
-                size = .{ .cols = new_size.cols, .rows = new_size.rows };
-                try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
-            },
-            .paste_start => {
-                repl.pasteStart();
-            },
-            .paste_end => {
-                repl.pasteEnd();
-            },
-            .key => |key| {
-                // Convert backend.Key to Repl.Key
-                const repl_key = convertKey(key);
-
-                // Handle the key
-                const action = try repl.handleKey(repl_key);
-
-                switch (action) {
-                    .submit => {
-                        if (try repl.submit()) |text| {
-                            defer allocator.free(text);
-
-                            // Echo command to log
-                            try echoToLog(&log, text, repl.getPrompt());
-
-                            // Handle commands
-                            if (std.mem.eql(u8, text, "clear")) {
-                                log.clear();
-                                try log.append("Screen cleared.");
-                            } else if (std.mem.eql(u8, text, "help")) {
-                                try log.append("Commands: help, clear, history, exit");
-                            } else if (std.mem.eql(u8, text, "history")) {
-                                try log.print("History has {} entries", .{repl.history.count()});
-                            } else if (std.mem.eql(u8, text, "exit")) {
-                                running = false;
-                            } else if (text.len > 0) {
-                                try log.print("Unknown command: '{s}'. Type 'help' for commands.", .{text});
-                            }
-
-                            current_input_rows = 1;
-                            try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
-                        }
-                    },
-                    .cancel => {
-                        repl.cancel();
-                        current_input_rows = 1;
-                        try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
-                    },
-                    .eof => {
-                        running = false;
-                    },
-                    .clear_screen => {
-                        log.clear();
-                        try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
-                    },
-                    .redraw, .none => {
-                        // Just redraw input area
-                        const bounds = calcBounds(size, header_height, min_log_lines, current_input_rows);
-                        current_input_rows = try renderInput(backend, &repl, bounds.input_start, max_input_rows, size.cols, allocator);
-
-                        // If input grew, need full redraw
-                        if (current_input_rows != bounds.expected_input) {
-                            try fullRender(backend, &log, &repl, size, header_height, min_log_lines, max_input_rows, &current_input_rows, allocator);
-                        }
-                    },
-                }
-            },
-            else => {},
-        }
+        return .{
+            .log = log,
+            .repl = repl,
+            .size = size,
+            .running = true,
+            .allocator = allocator,
+        };
     }
 
-    // Cleanup
-    backend.execute(&.{
-        .{ .move_cursor = .{ .x = 0, .y = size.rows - 1 } },
-        .{ .draw_text = .{ .text = "\n" } },
-        .flush,
-    });
-}
+    pub fn deinit(self: *Model) void {
+        self.repl.deinit();
+        self.log.deinit();
+    }
+};
 
-/// Calculate layout bounds using the layout system concepts
-fn calcBounds(size: phosphor.Size, header_height: u16, min_log: u16, input_rows: u16) struct {
-    log_start: u16,
-    log_end: u16,
-    input_start: u16,
-    expected_input: u16,
-} {
-    const available = if (size.rows > header_height + 1) size.rows - header_height - 1 else 1;
-    const input_space = @min(input_rows, available -| min_log);
-    const input_start = size.rows -| input_space;
-    const log_end = if (input_start > header_height + 1) input_start - 2 else header_height;
+// ─────────────────────────────────────────────────────────────
+// Msg - all possible events/messages
+// ─────────────────────────────────────────────────────────────
 
-    return .{
-        .log_start = header_height,
-        .log_end = log_end,
-        .input_start = input_start,
-        .expected_input = input_space,
+const Msg = union(enum) {
+    key: Key,
+    resize: Size,
+    paste_start,
+    paste_end,
+    tick,
+    none,
+};
+
+fn eventToMsg(event: Event) Msg {
+    return switch (event) {
+        .key => |k| .{ .key = k },
+        .resize => |s| .{ .resize = s },
+        .paste_start => .paste_start,
+        .paste_end => .paste_end,
+        .tick => .tick,
+        .none => .none,
     };
 }
 
-/// Full screen render using DrawCommands
-fn fullRender(
-    backend: Backend,
-    log: *const LogView,
-    repl: *Repl,
-    size: phosphor.Size,
-    header_height: u16,
-    min_log: u16,
-    max_input: u16,
-    current_input_rows: *u16,
-    allocator: std.mem.Allocator,
-) !void {
-    const bounds = calcBounds(size, header_height, min_log, current_input_rows.*);
+// ─────────────────────────────────────────────────────────────
+// Update - state transitions (as pure as possible)
+// ─────────────────────────────────────────────────────────────
 
-    // Build commands
+fn update(model: *Model, msg: Msg) !void {
+    switch (msg) {
+        .resize => |new_size| {
+            model.size = new_size;
+        },
+        .paste_start => {
+            model.repl.pasteStart();
+        },
+        .paste_end => {
+            model.repl.pasteEnd();
+        },
+        .key => |key| {
+            const action = try model.repl.handleKey(key);
+            try handleAction(model, action);
+        },
+        .tick, .none => {},
+    }
+}
+
+fn handleAction(model: *Model, action: Repl.Action) !void {
+    switch (action) {
+        .submit => {
+            if (try model.repl.submit()) |text| {
+                defer model.allocator.free(text);
+                try echoToLog(&model.log, text, model.repl.getPrompt());
+                try handleCommand(model, text);
+            }
+        },
+        .cancel => {
+            model.repl.cancel();
+        },
+        .eof => {
+            model.running = false;
+        },
+        .clear_screen => {
+            model.log.clear();
+        },
+        .redraw, .none => {},
+    }
+}
+
+fn handleCommand(model: *Model, text: []const u8) !void {
+    if (std.mem.eql(u8, text, "clear")) {
+        model.log.clear();
+        try model.log.append("Screen cleared.");
+    } else if (std.mem.eql(u8, text, "help")) {
+        try model.log.append("Commands: help, clear, history, exit");
+    } else if (std.mem.eql(u8, text, "history")) {
+        try model.log.print("History has {} entries", .{model.repl.history.count()});
+    } else if (std.mem.eql(u8, text, "exit")) {
+        model.running = false;
+    } else if (text.len > 0) {
+        try model.log.print("Unknown command: '{s}'. Type 'help' for commands.", .{text});
+    }
+}
+
+fn echoToLog(log: *LogView, text: []const u8, prompt: []const u8) !void {
+    var lines_iter = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines_iter.next()) |line| {
+        if (first) {
+            try log.print("{s}{s}", .{ prompt, line });
+            first = false;
+        } else {
+            try log.print("... {s}", .{line});
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// View - pure function producing DrawCommands
+// ─────────────────────────────────────────────────────────────
+
+const ViewResult = struct {
+    commands: []DrawCommand,
+    cursor: struct { x: u16, y: u16 },
+    // Owned allocations that DrawCommands reference - freed in deinit
+    text_allocs: [][]const u8,
+
+    pub fn deinit(self: *ViewResult, allocator: std.mem.Allocator) void {
+        for (self.text_allocs) |text| {
+            allocator.free(text);
+        }
+        allocator.free(self.text_allocs);
+        allocator.free(self.commands);
+    }
+};
+
+fn view(model: *const Model, allocator: std.mem.Allocator) !ViewResult {
+    const bounds = calcBounds(model);
+
     var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
-    defer commands.deinit(allocator);
+    errdefer commands.deinit(allocator);
 
-    // Clear screen
-    try commands.append(allocator, .clear_screen);
+    var text_allocs: std.ArrayListUnmanaged([]const u8) = .{};
+    errdefer {
+        for (text_allocs.items) |t| allocator.free(t);
+        text_allocs.deinit(allocator);
+    }
 
-    // Header
-    try appendHeaderCommands(&commands, allocator);
+    // Always render everything - Thermite's differential rendering
+    // will only output what actually changed
+    try appendHeader(&commands, &text_allocs, model.size, allocator);
+    try appendLog(&commands, &model.log, bounds.log_start, bounds.log_end, model.size.cols, allocator);
 
-    // Log area
-    try appendLogCommands(&commands, log, bounds.log_start, bounds.log_end, size.cols, allocator);
+    // Input area
+    const input_result = try appendInput(&commands, &text_allocs, &model.repl, bounds.input_start, model.size.cols, allocator);
 
-    // Execute batch
-    backend.execute(commands.items);
+    // Final cursor position and present
+    try commands.append(allocator, .{ .move_cursor = .{ .x = input_result.cursor_x, .y = input_result.cursor_y } });
+    try commands.append(allocator, .flush);
 
-    // Size indicator (rendered separately due to formatted text lifetime)
-    renderSizeIndicator(backend, size);
-
-    // Input area (returns row count)
-    current_input_rows.* = try renderInput(backend, repl, bounds.input_start, max_input, size.cols, allocator);
+    return .{
+        .commands = try commands.toOwnedSlice(allocator),
+        .cursor = .{ .x = input_result.cursor_x, .y = input_result.cursor_y },
+        .text_allocs = try text_allocs.toOwnedSlice(allocator),
+    };
 }
 
-/// Render size indicator separately (formatted text needs stable memory)
-fn renderSizeIndicator(backend: Backend, size: phosphor.Size) void {
-    var buf: [16]u8 = undefined;
-    const size_text = std.fmt.bufPrint(&buf, "{d}x{d}", .{ size.cols, size.rows }) catch "??x??";
-    const x = size.cols -| @as(u16, @intCast(size_text.len));
+const Bounds = struct {
+    log_start: u16,
+    log_end: u16,
+    input_start: u16,
+};
 
-    // Execute immediately while buf is still valid
-    backend.execute(&.{
-        .{ .move_cursor = .{ .x = x, .y = 0 } },
-        .{ .draw_text = .{ .text = size_text } },
-    });
+fn calcBounds(model: *const Model) Bounds {
+    const input_rows = calcInputRows(model);
+    const available = if (model.size.rows > Model.header_height + 1)
+        model.size.rows - Model.header_height - 1
+    else
+        1;
+    const input_space = @min(input_rows, available -| Model.min_log_lines);
+    const input_start = model.size.rows -| input_space;
+    const log_end = if (input_start > Model.header_height + 1)
+        input_start - 2
+    else
+        Model.header_height;
+
+    return .{
+        .log_start = Model.header_height,
+        .log_end = log_end,
+        .input_start = input_start,
+    };
 }
 
-/// Generate header DrawCommands
-fn appendHeaderCommands(
+fn calcInputRows(model: *const Model) u16 {
+    // Calculate how many rows the input will need based on content
+    const text = model.repl.buffer.getTextSlice() orelse return 1;
+    const width = model.size.cols;
+    const prompt_len = model.repl.getPrompt().len;
+    const content_width = if (width > prompt_len) width - @as(u16, @intCast(prompt_len)) else 1;
+
+    if (text.len == 0) return 1;
+
+    // Count newlines and wrapped lines
+    var rows: u16 = 1;
+    var col: usize = 0;
+    for (text) |c| {
+        if (c == '\n') {
+            rows += 1;
+            col = 0;
+        } else {
+            col += 1;
+            if (col >= content_width) {
+                rows += 1;
+                col = 0;
+            }
+        }
+    }
+
+    return @min(rows, Model.max_input_rows);
+}
+
+fn appendHeader(
     commands: *std.ArrayListUnmanaged(DrawCommand),
+    text_allocs: *std.ArrayListUnmanaged([]const u8),
+    size: Size,
     allocator: std.mem.Allocator,
 ) !void {
-    // Title
+    // Title row layout: hbox [title: grow] [size: fit]
+    // This is equivalent to: LayoutNode.hbox(&.{
+    //     .leafSized(title, .{ .w = .grow }),
+    //     .leafSized(size_indicator, .{ .w = .fit }),
+    // })
+    const title = "Phosphor REPL Demo";
+    const size_text = try std.fmt.allocPrint(allocator, "{d}x{d}", .{ size.cols, size.rows });
+    try text_allocs.append(allocator, size_text);
+
+    // Layout calculation:
+    // - size_indicator gets its preferred width (text length)
+    // - title grows to fill remaining space
+    const size_indicator_width: u16 = @intCast(size_text.len);
+    const title_width = size.cols -| size_indicator_width;
+    const size_indicator_x = title_width;
+
+    // Render title in bounds [0, title_width)
     try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
-    try commands.append(allocator, .{ .draw_text = .{ .text = "Phosphor REPL Demo" } });
+    const display_title = title[0..@min(title.len, title_width)];
+    try commands.append(allocator, .{ .draw_text = .{ .text = display_title } });
+
+    // Render size indicator in bounds [size_indicator_x, cols)
+    try commands.append(allocator, .{ .move_cursor = .{ .x = size_indicator_x, .y = 0 } });
+    try commands.append(allocator, .{ .draw_text = .{ .text = size_text } });
 
     // Help line
     try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 1 } });
@@ -235,8 +303,7 @@ fn appendHeaderCommands(
     try commands.append(allocator, .{ .draw_text = .{ .text = "────────────────────────────────────────────────────────────────" } });
 }
 
-/// Generate log area DrawCommands
-fn appendLogCommands(
+fn appendLog(
     commands: *std.ArrayListUnmanaged(DrawCommand),
     log: *const LogView,
     start_row: u16,
@@ -246,8 +313,6 @@ fn appendLogCommands(
 ) !void {
     const view_height = end_row - start_row + 1;
     const visible = log.getVisibleLines(view_height);
-
-    // Align to bottom
     const empty_rows = view_height - visible.len;
 
     // Clear empty rows
@@ -262,55 +327,53 @@ fn appendLogCommands(
         const row = start_row + @as(u16, @intCast(empty_rows + i));
         try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
         try commands.append(allocator, .clear_line);
-
         const display_len = @min(line.text.len, width);
         try commands.append(allocator, .{ .draw_text = .{ .text = line.text[0..display_len] } });
     }
 }
 
-/// Render input area - returns number of rows used
-fn renderInput(
-    backend: Backend,
-    repl: *Repl,
+const InputResult = struct {
+    cursor_x: u16,
+    cursor_y: u16,
+};
+
+fn appendInput(
+    commands: *std.ArrayListUnmanaged(DrawCommand),
+    text_allocs: *std.ArrayListUnmanaged([]const u8),
+    repl: *const Repl,
     start_line: u16,
-    max_lines: u16,
     width: u16,
     allocator: std.mem.Allocator,
-) !u16 {
+) !InputResult {
     const text = try repl.buffer.getText(allocator);
-    defer allocator.free(text);
+    try text_allocs.append(allocator, text); // Transfer ownership to caller
 
     const prompt = repl.getPrompt();
     const prompt_len: u16 = @intCast(prompt.len);
     const wrap_indent = "    ";
-    const wrap_indent_len: u16 = @intCast(wrap_indent.len);
+    const wrap_indent_len: u16 = 4;
     const newline_cont = "... ";
-    const newline_cont_len: u16 = @intCast(newline_cont.len);
-
-    var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
-    defer commands.deinit(allocator);
+    const newline_cont_len: u16 = 4;
 
     var rows_used: u16 = 0;
     var text_idx: usize = 0;
-    var cursor_screen_row: u16 = 0;
-    var cursor_screen_col: u16 = 0;
+    var cursor_x: u16 = prompt_len;
+    var cursor_y: u16 = start_line;
     const cursor_pos = repl.getCursor();
     var is_first_row = true;
     var after_newline = false;
 
-    while (text_idx <= text.len and rows_used < max_lines) {
+    while (text_idx <= text.len and rows_used < Model.max_input_rows) {
         const row = start_line + rows_used;
         try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
         try commands.append(allocator, .clear_line);
 
-        // Prefix for this row
         const prefix = if (is_first_row) prompt else if (after_newline) newline_cont else wrap_indent;
-        const prefix_len_val = if (is_first_row) prompt_len else if (after_newline) newline_cont_len else wrap_indent_len;
+        const prefix_len: u16 = if (is_first_row) prompt_len else if (after_newline) newline_cont_len else wrap_indent_len;
         try commands.append(allocator, .{ .draw_text = .{ .text = prefix } });
 
-        const content_width: usize = if (width > prefix_len_val) width - prefix_len_val else 1;
+        const content_width: usize = if (width > prefix_len) width - prefix_len else 1;
 
-        // Find text for this row
         var row_end = text_idx;
         var chars_on_row: usize = 0;
         while (row_end < text.len and chars_on_row < content_width) {
@@ -323,10 +386,10 @@ fn renderInput(
             try commands.append(allocator, .{ .draw_text = .{ .text = text[text_idx..row_end] } });
         }
 
-        // Track cursor position
+        // Track cursor
         if (cursor_pos >= text_idx and cursor_pos <= row_end) {
-            cursor_screen_row = row;
-            cursor_screen_col = prefix_len_val + @as(u16, @intCast(cursor_pos - text_idx));
+            cursor_y = row;
+            cursor_x = prefix_len + @as(u16, @intCast(cursor_pos - text_idx));
         }
 
         is_first_row = false;
@@ -336,8 +399,8 @@ fn renderInput(
             text_idx = row_end + 1;
             after_newline = true;
             if (cursor_pos == row_end) {
-                cursor_screen_row = row;
-                cursor_screen_col = prefix_len_val + @as(u16, @intCast(chars_on_row));
+                cursor_y = row;
+                cursor_x = prefix_len + @as(u16, @intCast(chars_on_row));
             }
         } else if (row_end < text.len) {
             text_idx = row_end;
@@ -350,64 +413,58 @@ fn renderInput(
 
     // Empty input
     if (rows_used == 0) {
-        const row = start_line;
-        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
+        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = start_line } });
         try commands.append(allocator, .clear_line);
         try commands.append(allocator, .{ .draw_text = .{ .text = prompt } });
-        cursor_screen_row = row;
-        cursor_screen_col = prompt_len;
-        rows_used = 1;
+        cursor_x = prompt_len;
+        cursor_y = start_line;
     }
 
-    // Position cursor and flush
-    try commands.append(allocator, .{ .move_cursor = .{ .x = cursor_screen_col, .y = cursor_screen_row } });
-    try commands.append(allocator, .flush);
-
-    backend.execute(commands.items);
-
-    return rows_used;
+    return .{ .cursor_x = cursor_x, .cursor_y = cursor_y };
 }
 
-/// Echo command to log (handles multiline)
-fn echoToLog(log: *LogView, text: []const u8, prompt: []const u8) !void {
-    var lines_iter = std.mem.splitScalar(u8, text, '\n');
-    var first = true;
-    while (lines_iter.next()) |line| {
-        if (first) {
-            try log.print("{s}{s}", .{ prompt, line });
-            first = false;
-        } else {
-            try log.print("... {s}", .{line});
+// ─────────────────────────────────────────────────────────────
+// Main - wire it all together
+// ─────────────────────────────────────────────────────────────
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Initialize Thermite backend (double-buffered, differential rendering)
+    var thermite_backend = try ThermiteBackend.init(allocator);
+    defer thermite_backend.deinit();
+    const backend = thermite_backend.backend();
+
+    // Initialize model
+    var model = try Model.init(allocator, backend.getSize());
+    defer model.deinit();
+
+    // Initial render
+    {
+        var result = try view(&model, allocator);
+        defer result.deinit(allocator);
+        backend.execute(result.commands);
+    }
+
+    // Event loop - Thermite handles diffing, so we always render full view
+    while (model.running) {
+        const maybe_event = try backend.readEvent();
+        if (maybe_event == null) continue;
+
+        // Handle resize at the backend level (reallocate planes)
+        if (maybe_event.? == .resize) {
+            const new_size = maybe_event.?.resize;
+            try thermite_backend.resize(.{ .cols = new_size.cols, .rows = new_size.rows });
         }
-    }
-}
 
-/// Convert backend.Key to Repl.Key
-fn convertKey(key: phosphor.Key) Repl.Key {
-    return switch (key) {
-        .char => |c| .{ .char = c },
-        .enter => .enter,
-        .backspace => .backspace,
-        .delete => .delete,
-        .tab => .tab,
-        .escape => .escape,
-        .up => .up,
-        .down => .down,
-        .left => .left,
-        .right => .right,
-        .home => .home,
-        .end => .end,
-        .ctrl_a => .ctrl_a,
-        .ctrl_c => .ctrl_c,
-        .ctrl_d => .ctrl_d,
-        .ctrl_e => .ctrl_e,
-        .ctrl_k => .ctrl_k,
-        .ctrl_l => .ctrl_l,
-        .ctrl_o => .ctrl_o,
-        .ctrl_u => .ctrl_u,
-        .ctrl_w => .ctrl_w,
-        .ctrl_left => .ctrl_left,
-        .ctrl_right => .ctrl_right,
-        .unknown => .unknown,
-    };
+        const msg = eventToMsg(maybe_event.?);
+        try update(&model, msg);
+
+        // Re-render full view, Thermite only outputs changed cells
+        var result = try view(&model, allocator);
+        defer result.deinit(allocator);
+        backend.execute(result.commands);
+    }
 }
