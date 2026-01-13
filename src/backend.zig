@@ -7,6 +7,7 @@ const BoxStyle = render_commands.BoxStyle;
 const thermite = @import("thermite/root.zig");
 const ThermiteRenderer = thermite.Renderer;
 const ThermiteCell = thermite.Cell;
+const DEFAULT_COLOR = thermite.DEFAULT_COLOR;
 
 /// Event types that backends produce
 pub const Event = union(enum) {
@@ -528,8 +529,8 @@ pub const ThermiteBackend = struct {
             .allocator = allocator,
             .cursor_x = 0,
             .cursor_y = 0,
-            .current_fg = 0xFFFFFF, // White
-            .current_bg = 0x000000, // Black
+            .current_fg = DEFAULT_COLOR, // Terminal default
+            .current_bg = DEFAULT_COLOR, // Terminal default (transparent)
         };
     }
 
@@ -610,8 +611,8 @@ pub const ThermiteBackend = struct {
                     }
                 },
                 .reset_attributes => {
-                    self.current_fg = 0xFFFFFF;
-                    self.current_bg = 0x000000;
+                    self.current_fg = DEFAULT_COLOR;
+                    self.current_bg = DEFAULT_COLOR;
                 },
                 .flush => {
                     // Present on flush
@@ -626,23 +627,36 @@ pub const ThermiteBackend = struct {
     }
 
     fn writeText(self: *ThermiteBackend, text: []const u8) void {
-        for (text) |byte| {
+        var i: usize = 0;
+        while (i < text.len) {
+            const byte = text[i];
+
             if (byte == '\n') {
                 self.cursor_y += 1;
                 self.cursor_x = 0;
+                i += 1;
                 continue;
             }
+
+            // Decode UTF-8 to get codepoint and byte length
+            const codepoint_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+            const codepoint = if (i + codepoint_len <= text.len)
+                std.unicode.utf8Decode(text[i..][0..codepoint_len]) catch byte
+            else
+                byte;
 
             if (self.cursor_x < self.renderer.term_width and
                 self.cursor_y < self.renderer.term_height)
             {
                 self.renderer.back_plane.setCell(self.cursor_x, self.cursor_y, .{
-                    .ch = byte,
+                    .ch = codepoint,
                     .fg = self.current_fg,
                     .bg = self.current_bg,
                 });
                 self.cursor_x += 1;
             }
+
+            i += codepoint_len;
         }
     }
 
@@ -656,25 +670,24 @@ pub const ThermiteBackend = struct {
     }
 
     fn colorToRgb(color: render_commands.Color) u32 {
-        // Convert Color enum to RGB
+        // Convert CGA Color enum to RGB
         return switch (color) {
             .black => 0x000000,
-            .red => 0xAA0000,
-            .green => 0x00AA00,
-            .yellow => 0xAAAA00,
             .blue => 0x0000AA,
-            .magenta => 0xAA00AA,
+            .green => 0x00AA00,
             .cyan => 0x00AAAA,
-            .white => 0xAAAAAA,
-            .bright_black => 0x555555,
-            .bright_red => 0xFF5555,
-            .bright_green => 0x55FF55,
-            .bright_yellow => 0xFFFF55,
-            .bright_blue => 0x5555FF,
-            .bright_magenta => 0xFF55FF,
-            .bright_cyan => 0x55FFFF,
-            .bright_white => 0xFFFFFF,
-            .default => 0xAAAAAA,
+            .red => 0xAA0000,
+            .magenta => 0xAA00AA,
+            .brown => 0xAA5500,
+            .light_gray => 0xAAAAAA,
+            .dark_gray => 0x555555,
+            .light_blue => 0x5555FF,
+            .light_green => 0x55FF55,
+            .light_cyan => 0x55FFFF,
+            .light_red => 0xFF5555,
+            .light_magenta => 0xFF55FF,
+            .yellow => 0xFFFF55,
+            .white => 0xFFFFFF,
         };
     }
 

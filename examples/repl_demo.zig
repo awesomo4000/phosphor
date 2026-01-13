@@ -29,8 +29,11 @@ const Model = struct {
     running: bool,
     allocator: std.mem.Allocator,
 
-    // Layout config (could be in a separate Config struct)
-    const header_height: u16 = 3;
+    // Layout structure (vbox):
+    //   Row 0: Title bar - hbox [title: grow] [size: fit]
+    //   Row 1: Separator - fixed h=1, grows to width
+    //   Remaining: vbox [log: grow] [repl: fit to content]
+    const header_height: u16 = 2; // title + separator
     const min_log_lines: u16 = 3;
     const max_input_rows: u16 = 10;
 
@@ -41,10 +44,10 @@ const Model = struct {
         var repl = try Repl.init(allocator, .{ .prompt = "phosphor> " });
         errdefer repl.deinit();
 
-        // Welcome messages
+        // Welcome messages (help moved here from header)
         try log.append("Welcome to Phosphor REPL Demo!");
         try log.append("Commands: help, clear, history, exit");
-        try log.append("Ctrl+O inserts newline for multiline input");
+        try log.append("Keys: Ctrl+O newline | Ctrl+C cancel | Ctrl+D exit");
         try log.append("");
 
         return .{
@@ -190,8 +193,11 @@ fn view(model: *const Model, allocator: std.mem.Allocator) !ViewResult {
         text_allocs.deinit(allocator);
     }
 
-    // Always render everything - Thermite's differential rendering
-    // will only output what actually changed
+    // Clear back buffer before rendering - essential for differential rendering
+    // Without this, old content persists in cells we don't explicitly write to
+    try commands.append(allocator, .clear_screen);
+
+    // Render all components - Thermite diffs against previous frame
     try appendHeader(&commands, &text_allocs, model.size, allocator);
     try appendLog(&commands, &model.log, bounds.log_start, bounds.log_end, model.size.cols, allocator);
 
@@ -269,38 +275,44 @@ fn appendHeader(
     size: Size,
     allocator: std.mem.Allocator,
 ) !void {
-    // Title row layout: hbox [title: grow] [size: fit]
-    // This is equivalent to: LayoutNode.hbox(&.{
-    //     .leafSized(title, .{ .w = .grow }),
-    //     .leafSized(size_indicator, .{ .w = .fit }),
-    // })
+    // ═══════════════════════════════════════════════════════════════
+    // Row 0: Title bar - hbox [title: grow] [size: fit]
+    // ═══════════════════════════════════════════════════════════════
     const title = "Phosphor REPL Demo";
     const size_text = try std.fmt.allocPrint(allocator, "{d}x{d}", .{ size.cols, size.rows });
     try text_allocs.append(allocator, size_text);
 
-    // Layout calculation:
-    // - size_indicator gets its preferred width (text length)
-    // - title grows to fill remaining space
-    const size_indicator_width: u16 = @intCast(size_text.len);
-    const title_width = size.cols -| size_indicator_width;
-    const size_indicator_x = title_width;
+    // Layout: size_indicator gets its preferred width, title grows to fill rest
+    const size_width: u16 = @intCast(size_text.len);
+    const title_x: u16 = 0;
+    const size_x: u16 = size.cols -| size_width;
 
-    // Render title in bounds [0, title_width)
-    try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
-    const display_title = title[0..@min(title.len, title_width)];
+    // Render title (grows to fill space before size indicator)
+    try commands.append(allocator, .{ .move_cursor = .{ .x = title_x, .y = 0 } });
+    try commands.append(allocator, .clear_line);
+    const display_title = title[0..@min(title.len, size_x)];
     try commands.append(allocator, .{ .draw_text = .{ .text = display_title } });
 
-    // Render size indicator in bounds [size_indicator_x, cols)
-    try commands.append(allocator, .{ .move_cursor = .{ .x = size_indicator_x, .y = 0 } });
+    // Render size indicator (fits to content, right-aligned)
+    try commands.append(allocator, .{ .move_cursor = .{ .x = size_x, .y = 0 } });
     try commands.append(allocator, .{ .draw_text = .{ .text = size_text } });
 
-    // Help line
-    try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 1 } });
-    try commands.append(allocator, .{ .draw_text = .{ .text = "Ctrl+O: newline | Ctrl+C: cancel | Ctrl+D: exit" } });
+    // ═══════════════════════════════════════════════════════════════
+    // Row 1: Separator - grows to terminal width
+    // ═══════════════════════════════════════════════════════════════
+    const separator = try allocator.alloc(u8, size.cols * 3); // UTF-8: ─ is 3 bytes
+    try text_allocs.append(allocator, separator);
 
-    // Separator
-    try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 2 } });
-    try commands.append(allocator, .{ .draw_text = .{ .text = "────────────────────────────────────────────────────────────────" } });
+    var sep_idx: usize = 0;
+    for (0..size.cols) |_| {
+        separator[sep_idx] = 0xe2; // ─ UTF-8: E2 94 80
+        separator[sep_idx + 1] = 0x94;
+        separator[sep_idx + 2] = 0x80;
+        sep_idx += 3;
+    }
+
+    try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 1 } });
+    try commands.append(allocator, .{ .draw_text = .{ .text = separator[0..sep_idx] } });
 }
 
 fn appendLog(

@@ -36,9 +36,8 @@ var terminal_state: ?TerminalState = null;
 var current_fg: u8 = Color.WHITE;
 var current_bg: u8 = Color.BLACK;
 
-// Resize handling
+// Resize handling - just a flag, size is always queried fresh via ioctl
 var resize_pending: bool = false;
-var cached_size: Size = .{ .rows = 24, .cols = 80 };
 
 // Output buffer for stdout (used by writer)
 threadlocal var stdout_buffer: [4096]u8 = undefined;
@@ -74,8 +73,7 @@ pub fn installResizeHandler() void {
 pub fn checkResize() ?Size {
     if (resize_pending) {
         resize_pending = false;
-        cached_size = getSize();
-        return cached_size;
+        return getSize(); // Fresh ioctl query - fast syscall, no need to cache
     }
     return null;
 }
@@ -107,9 +105,8 @@ pub fn init() !void {
     // Enable raw mode via the state manager
     try terminal_state.?.enableRawMode();
 
-    // Install resize handler and cache initial size
+    // Install resize handler
     installResizeHandler();
-    cached_size = getSize();
 }
 
 // Initialize TUI with specific default colors
