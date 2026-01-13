@@ -1,0 +1,24 @@
+# Zig build artifacts (including in subdirectories)
+.zig-cache/
+zig-out/
+**/.zig-cache/
+**/zig-out/
+
+# Claude
+.claude/
+CLAUDE.md
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+repl_history.txt
+x/
