@@ -161,7 +161,8 @@ pub const TerminalState = struct {
 
     /// Reset cursor color to terminal default
     pub fn resetCursorColor(self: *TerminalState) void {
-        sendSequence("\x1b]12;default\x07");
+        // OSC 112 is the dedicated reset sequence for cursor color
+        sendSequence("\x1b]112\x07");
         self.modes_enabled.cursor_color_changed = false;
     }
 
@@ -171,7 +172,7 @@ pub const TerminalState = struct {
 
         // Reset cursor color if changed
         if (self.modes_enabled.cursor_color_changed) {
-            sendSequence("\x1b]12;default\x07");
+            sendSequence("\x1b]112\x07");
             self.modes_enabled.cursor_color_changed = false;
         }
 
