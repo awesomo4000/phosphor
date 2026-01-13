@@ -21,6 +21,7 @@ pub const TerminalState = struct {
         bracketed_paste: bool = false,
         kitty_keyboard: bool = false,
         cursor_hidden: bool = false,
+        cursor_color_changed: bool = false,
     };
 
     /// Global instance for signal handler access
@@ -147,9 +148,32 @@ pub const TerminalState = struct {
         self.modes_enabled.cursor_hidden = false;
     }
 
+    /// Set cursor color using OSC 12 sequence
+    /// Color can be a name ("red", "gray") or hex ("#RRGGBB" or "#RGB")
+    /// Note: Not all terminals support this (iTerm2, kitty, xterm do; Terminal.app may not)
+    pub fn setCursorColor(self: *TerminalState, color: []const u8) void {
+        const stdout = std.fs.File.stdout();
+        _ = stdout.write("\x1b]12;") catch {};
+        _ = stdout.write(color) catch {};
+        _ = stdout.write("\x07") catch {};
+        self.modes_enabled.cursor_color_changed = true;
+    }
+
+    /// Reset cursor color to terminal default
+    pub fn resetCursorColor(self: *TerminalState) void {
+        sendSequence("\x1b]12;default\x07");
+        self.modes_enabled.cursor_color_changed = false;
+    }
+
     /// Restore all enabled modes to their defaults
     pub fn restoreAllModes(self: *TerminalState) void {
         // Restore in reverse order of typical enabling
+
+        // Reset cursor color if changed
+        if (self.modes_enabled.cursor_color_changed) {
+            sendSequence("\x1b]12;default\x07");
+            self.modes_enabled.cursor_color_changed = false;
+        }
 
         // Show cursor if hidden
         if (self.modes_enabled.cursor_hidden) {

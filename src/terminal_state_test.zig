@@ -39,6 +39,7 @@ test "EnabledModes defaults to all false" {
     try std.testing.expect(!modes.bracketed_paste);
     try std.testing.expect(!modes.kitty_keyboard);
     try std.testing.expect(!modes.cursor_hidden);
+    try std.testing.expect(!modes.cursor_color_changed);
 }
 
 test "EnabledModes can be set individually" {

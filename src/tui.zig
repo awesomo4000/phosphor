@@ -148,6 +148,22 @@ pub fn showCursor(visible: bool) !void {
     try stdout.flush();
 }
 
+// Set cursor color (OSC 12 sequence)
+// Color can be a name ("red", "gray") or hex ("#RRGGBB")
+// Note: Not all terminals support this
+pub fn setCursorColor(color: []const u8) void {
+    if (terminal_state) |*state| {
+        state.setCursorColor(color);
+    }
+}
+
+// Reset cursor color to terminal default
+pub fn resetCursorColor() void {
+    if (terminal_state) |*state| {
+        state.resetCursorColor();
+    }
+}
+
 // Move cursor to position using x,y coordinates (0-based)
 pub fn moveTo(x: u16, y: u16) !void {
     var writer = std.fs.File.stdout().writer(&stdout_buffer);
