@@ -122,34 +122,41 @@ fn update(model: *Model, msg: Msg) !void {
     }
 }
 
-/// Route events to widgets based on subscriptions
+/// Route events to widgets based on subscriptions, collect messages
 /// (This is runtime code - would live in Runtime struct)
-fn routeToWidgets(model: *Model, msg: Msg) !void {
+fn routeToWidgets(model: *Model, msg: Msg) !?Repl.ReplMsg {
     // Check repl widget's subscriptions
     const repl_subs = model.repl.subscriptions();
     if (isSubscribed(repl_subs, msg)) {
-        switch (msg) {
-            .paste_start => model.repl.pasteStart(),
-            .paste_end => model.repl.pasteEnd(),
-            .key => |key| {
-                const action = try model.repl.handleKey(key);
-                try handleAction(model, action);
-            },
-            else => {},
+        // Convert app Msg to widget Event
+        const widget_event: ?Repl.Event = switch (msg) {
+            .key => |k| .{ .key = k },
+            .paste_start => .paste_start,
+            .paste_end => .paste_end,
+            else => null,
+        };
+
+        if (widget_event) |event| {
+            // Widget processes event, returns message for app
+            return try model.repl.update(event);
         }
     }
+    return null;
 }
 
-fn handleAction(model: *Model, action: Repl.Action) !void {
-    switch (action) {
-        .submit => {
-            if (try model.repl.submit()) |text| {
-                defer model.allocator.free(text);
-                try echoToLog(&model.log, text, model.repl.getPrompt());
-                try handleCommand(model, text);
-            }
+/// Handle messages from the Repl widget
+/// (This is app code - what the app author writes)
+fn handleReplMsg(model: *Model, repl_msg: Repl.ReplMsg) !void {
+    switch (repl_msg) {
+        .submitted => |text| {
+            // Echo to log and handle command
+            // Note: text is a slice into widget's buffer, valid until next update
+            try echoToLog(&model.log, text, model.repl.getPrompt());
+            try handleCommand(model, text);
+            // Finalize submission (clears buffer, adds to history)
+            try model.repl.finalizeSubmit();
         },
-        .cancel => {
+        .cancelled => {
             model.repl.cancel();
         },
         .eof => {
@@ -158,7 +165,9 @@ fn handleAction(model: *Model, action: Repl.Action) !void {
         .clear_screen => {
             model.log.clear();
         },
-        .redraw, .none => {},
+        .text_changed => {
+            // Could do validation, autocomplete lookup, etc.
+        },
     }
 }
 
@@ -614,7 +623,11 @@ pub fn main() !void {
         const msg = eventToMsg(maybe_event.?);
 
         // Runtime: route events to widgets based on subscriptions
-        try routeToWidgets(&model, msg);
+        // Widget returns messages for the app
+        if (try routeToWidgets(&model, msg)) |repl_msg| {
+            // App: handle widget messages
+            try handleReplMsg(&model, repl_msg);
+        }
 
         // App: handle app-level messages (resize, etc.)
         try update(&model, msg);

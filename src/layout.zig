@@ -3,6 +3,28 @@ const Allocator = std.mem.Allocator;
 const render_commands = @import("render_commands.zig");
 const DrawCommand = render_commands.DrawCommand;
 
+/// Calculate how many bytes of a UTF-8 string fit in the given column width.
+/// Assumes each codepoint takes 1 column (doesn't handle wide chars like CJK).
+fn utf8BytesForColumns(str: []const u8, max_cols: u16) usize {
+    var cols: u16 = 0;
+    var bytes: usize = 0;
+
+    while (bytes < str.len and cols < max_cols) {
+        const byte = str[bytes];
+        // UTF-8 leading byte tells us how many bytes in this codepoint
+        const codepoint_len: usize = if (byte < 0x80) 1 // ASCII
+        else if (byte < 0xE0) 2 // 2-byte sequence
+        else if (byte < 0xF0) 3 // 3-byte sequence
+        else 4; // 4-byte sequence
+
+        if (bytes + codepoint_len > str.len) break; // Truncated sequence
+        bytes += codepoint_len;
+        cols += 1;
+    }
+
+    return bytes;
+}
+
 /// Rectangle bounds for layout
 pub const Rect = struct {
     x: u16,
@@ -253,9 +275,10 @@ fn renderNode(
         .text => |str| {
             // Render text at current position
             try commands.append(allocator, .{ .move_cursor = .{ .x = content_bounds.x, .y = content_bounds.y } });
-            const display_len = @min(str.len, content_bounds.w);
-            if (display_len > 0) {
-                try commands.append(allocator, .{ .draw_text = .{ .text = str[0..display_len] } });
+            // Truncate to width in columns (not bytes) - UTF-8 aware
+            const display_bytes = utf8BytesForColumns(str, content_bounds.w);
+            if (display_bytes > 0) {
+                try commands.append(allocator, .{ .draw_text = .{ .text = str[0..display_bytes] } });
             }
         },
         .cursor => {
@@ -451,9 +474,9 @@ pub const Text = struct {
         const self: *const Text = @ptrCast(@alignCast(ptr));
         var commands = try allocator.alloc(DrawCommand, 2);
         commands[0] = .{ .move_cursor = .{ .x = bounds.x, .y = bounds.y } };
-        // Truncate to fit bounds
-        const display_len = @min(self.text.len, bounds.w);
-        commands[1] = .{ .draw_text = .{ .text = self.text[0..display_len] } };
+        // Truncate to fit bounds (UTF-8 aware)
+        const display_bytes = utf8BytesForColumns(self.text, bounds.w);
+        commands[1] = .{ .draw_text = .{ .text = self.text[0..display_bytes] } };
         return commands;
     }
 };

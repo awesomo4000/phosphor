@@ -178,6 +178,7 @@ pub const Repl = struct {
     }
 
     /// Submit current input, add to history, clear buffer
+    /// Returns allocated copy of text (caller must free)
     pub fn submit(self: *Repl) !?[]const u8 {
         const text = try self.buffer.getText(self.allocator);
 
@@ -193,6 +194,24 @@ pub const Repl = struct {
         self.in_paste = false;
 
         return text;
+    }
+
+    /// Finalize submission without returning text (use when you already have it)
+    /// Adds current text to history and clears buffer
+    pub fn finalizeSubmit(self: *Repl) !void {
+        // Add to history if non-empty (uses slice, no allocation)
+        if (self.buffer.getTextSlice()) |text| {
+            if (text.len > 0) {
+                // history.add() will copy the text internally
+                try self.history.add(text);
+            }
+        }
+
+        // Clear buffer for next input
+        self.buffer.clear();
+        self.history.resetNavigation();
+        self.segments.clearRetainingCapacity();
+        self.in_paste = false;
     }
 
     /// Get current input text (caller must free)
@@ -335,6 +354,7 @@ pub const Repl = struct {
         }
     };
 
+    /// Internal action type (used by handleKey)
     pub const Action = enum {
         none,
         redraw,
@@ -343,6 +363,52 @@ pub const Repl = struct {
         eof,
         clear_screen,
     };
+
+    /// Messages emitted by the Repl widget to the app
+    pub const ReplMsg = union(enum) {
+        text_changed: []const u8,
+        submitted: []const u8,
+        cancelled,
+        eof,
+        clear_screen,
+    };
+
+    /// Widget event types that Repl handles
+    pub const Event = union(enum) {
+        key: Key,
+        paste_start,
+        paste_end,
+    };
+
+    /// Process an event, update internal state, return message for app.
+    /// This is the main entry point for the runtime to send events to the widget.
+    pub fn update(self: *Repl, event: Event) !?ReplMsg {
+        switch (event) {
+            .key => |key| {
+                const action = try self.handleKey(key);
+                return self.actionToMsg(action);
+            },
+            .paste_start => {
+                self.pasteStart();
+                return null;
+            },
+            .paste_end => {
+                self.pasteEnd();
+                return null;
+            },
+        }
+    }
+
+    /// Convert internal Action to app-facing ReplMsg
+    fn actionToMsg(self: *Repl, action: Action) ?ReplMsg {
+        return switch (action) {
+            .none, .redraw => null,
+            .submit => .{ .submitted = self.buffer.getTextSlice() orelse "" },
+            .cancel => .cancelled,
+            .eof => .eof,
+            .clear_screen => .clear_screen,
+        };
+    }
 
     // ─────────────────────────────────────────────────────────────
     // New declarative view (returns LayoutNode tree)
