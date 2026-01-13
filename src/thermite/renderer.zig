@@ -184,7 +184,14 @@ pub const Renderer = struct {
                 const new_cell = self.back_plane.getCell(@intCast(x), @intCast(y));
 
                 // Skip unchanged cells (unless first frame)
-                if (!force_full and old_cell != null and new_cell != null and old_cell.?.eql(new_cell.?.*)) {
+                // On first frame, still skip default/empty cells for faster startup
+                if (old_cell != null and new_cell != null and old_cell.?.eql(new_cell.?.*)) {
+                    cursor_moved = false;
+                    continue;
+                }
+
+                // Skip blank cells on first frame (nothing to draw)
+                if (force_full and new_cell != null and new_cell.?.isDefault()) {
                     cursor_moved = false;
                     continue;
                 }

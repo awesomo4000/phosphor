@@ -421,19 +421,67 @@ pub const Repl = struct {
         const text = try self.buffer.getText(frame_alloc);
         const cursor_pos = self.buffer.cursor();
         const prompt = self.config.prompt;
+        const continuation = "... ";
 
-        // Allocate children array on frame allocator (survives function return)
-        const children = try frame_alloc.alloc(LayoutNode, 3);
-        children[0] = LayoutNode.text(prompt);
-        children[1] = LayoutNode.text(text);
-        children[2] = LayoutNode.cursorNode();
+        // Count lines
+        var line_count: usize = 1;
+        for (text) |c| {
+            if (c == '\n') line_count += 1;
+        }
+
+        // Calculate cursor row/col
+        var cursor_row: usize = 0;
+        var cursor_col: usize = 0;
+        var pos: usize = 0;
+        var col: usize = 0;
+        while (pos < text.len and pos < cursor_pos) : (pos += 1) {
+            if (text[pos] == '\n') {
+                cursor_row += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        cursor_col = col;
+
+        // Build line nodes
+        const line_nodes = try frame_alloc.alloc(LayoutNode, line_count);
+        var line_idx: usize = 0;
+        var line_start: usize = 0;
+
+        for (text, 0..) |c, i| {
+            if (c == '\n') {
+                const prefix = if (line_idx == 0) prompt else continuation;
+                const line_text = text[line_start..i];
+
+                // Create hbox for this line: [prefix][text]
+                const row_children = try frame_alloc.alloc(LayoutNode, 2);
+                row_children[0] = LayoutNode.text(prefix);
+                row_children[1] = LayoutNode.text(line_text);
+                line_nodes[line_idx] = LayoutNode.hbox(row_children);
+
+                line_idx += 1;
+                line_start = i + 1;
+            }
+        }
+
+        // Last line (or only line if no newlines)
+        const prefix = if (line_idx == 0) prompt else continuation;
+        const line_text = text[line_start..];
+        const row_children = try frame_alloc.alloc(LayoutNode, 2);
+        row_children[0] = LayoutNode.text(prefix);
+        row_children[1] = LayoutNode.text(line_text);
+        line_nodes[line_idx] = LayoutNode.hbox(row_children);
 
         return ViewTree{
             .frame_alloc = frame_alloc,
             .text = text,
             .prompt = prompt,
             .cursor_pos = cursor_pos,
-            .children = children,
+            .cursor_row = cursor_row,
+            .cursor_col = cursor_col,
+            .line_count = line_count,
+            .line_nodes = line_nodes,
         };
     }
 
@@ -442,22 +490,39 @@ pub const Repl = struct {
         text: []const u8,
         prompt: []const u8,
         cursor_pos: usize,
-        children: []LayoutNode, // Allocated on frame_alloc
+        cursor_row: usize,
+        cursor_col: usize,
+        line_count: usize,
+        line_nodes: []LayoutNode,
 
         /// Build the actual LayoutNode tree
-        /// Returns an hbox with [prompt][text][cursor]
+        /// Returns a vbox of lines for multiline, or single hbox for single line
         pub fn build(self: *const ViewTree) LayoutNode {
-            return LayoutNode.hbox(self.children);
+            if (self.line_count == 1) {
+                return self.line_nodes[0];
+            }
+            return LayoutNode.vbox(self.line_nodes);
         }
 
-        /// Get cursor X position (prompt_len + cursor_pos)
+        /// Get cursor X position (prefix_len + cursor_col)
         pub fn getCursorX(self: *const ViewTree) u16 {
-            return @intCast(self.prompt.len + @min(self.cursor_pos, self.text.len));
+            const prefix_len = if (self.cursor_row == 0) self.prompt.len else 4; // "... "
+            return @intCast(prefix_len + self.cursor_col);
+        }
+
+        /// Get cursor Y offset from start of repl area
+        pub fn getCursorRow(self: *const ViewTree) u16 {
+            return @intCast(self.cursor_row);
+        }
+
+        /// Get total height in lines
+        pub fn getHeight(self: *const ViewTree) u16 {
+            return @intCast(self.line_count);
         }
 
         pub fn deinit(self: *ViewTree) void {
             self.frame_alloc.free(self.text);
-            self.frame_alloc.free(self.children);
+            // Note: line_nodes and their children are on frame_alloc, freed with arena
         }
     };
 };

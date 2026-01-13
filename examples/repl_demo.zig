@@ -542,9 +542,9 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
     var log_node = log_view.build();
     log_node.sizing.h = .{ .grow = .{} };
 
-    // REPL input
+    // REPL input - height based on actual line count
     var repl_node = repl_view.build();
-    repl_node.sizing.h = .{ .fixed = 1 };
+    repl_node.sizing.h = .{ .fixed = repl_view.getHeight() };
 
     // Root vbox
     const root_children = try alloc.alloc(LayoutNode, 4);
@@ -567,9 +567,11 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
     const tree_commands = try renderTree(&root, full_bounds, alloc);
     try commands_list.appendSlice(alloc, tree_commands);
 
-    // Calculate cursor position (prompt_len + cursor_pos on the last row)
+    // Calculate cursor position based on multiline layout
     const cursor_x = repl_view.getCursorX();
-    const cursor_y = model.size.rows - 1;
+    // REPL starts at (screen height - repl height), cursor is offset within repl
+    const repl_start_y = model.size.rows - repl_view.getHeight();
+    const cursor_y = repl_start_y + repl_view.getCursorRow();
 
     // Add cursor and flush
     try commands_list.append(alloc, .{ .move_cursor = .{ .x = cursor_x, .y = cursor_y } });

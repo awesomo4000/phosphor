@@ -25,13 +25,19 @@ pub const Cell = struct {
     pub fn eql(self: Cell, other: Cell) bool {
         return self.ch == other.ch and self.fg == other.fg and self.bg == other.bg;
     }
+
+    /// Check if this cell is the default (space with default colors)
+    pub fn isDefault(self: Cell) bool {
+        return self.ch == ' ' and self.fg == DEFAULT_COLOR and self.bg == DEFAULT_COLOR;
+    }
 };
 
 test "Cell initialization" {
     const cell = Cell.init();
     try testing.expect(cell.ch == ' ');
-    try testing.expect(cell.fg == 0xFFFFFF);
-    try testing.expect(cell.bg == 0x000000);
+    try testing.expect(cell.fg == DEFAULT_COLOR);
+    try testing.expect(cell.bg == DEFAULT_COLOR);
+    try testing.expect(cell.isDefault());
 }
 
 test "Cell equality" {
