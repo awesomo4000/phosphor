@@ -4,6 +4,23 @@ const LineBuffer = @import("line_buffer.zig").LineBuffer;
 const phosphor = @import("phosphor");
 const DrawCommand = phosphor.DrawCommand;
 
+/// Segment kind - distinguishes typed input from pasted content
+pub const SegmentKind = enum {
+    typed,
+    pasted,
+};
+
+/// A segment of input text with its kind
+pub const Segment = struct {
+    kind: SegmentKind,
+    start: usize,
+    end: usize,
+
+    pub fn len(self: Segment) usize {
+        return self.end - self.start;
+    }
+};
+
 /// REPL widget - readline-style input with modern features
 pub const Repl = struct {
     allocator: Allocator,
@@ -11,6 +28,8 @@ pub const Repl = struct {
     // Core state
     buffer: LineBuffer,
     history: History,
+    segments: std.ArrayListUnmanaged(Segment),
+    in_paste: bool,
 
     // Configuration
     config: Config,
@@ -29,6 +48,8 @@ pub const Repl = struct {
             .allocator = allocator,
             .buffer = try LineBuffer.init(allocator),
             .history = History.init(allocator, config.history_limit),
+            .segments = .{},
+            .in_paste = false,
             .config = config,
         };
     }
@@ -36,6 +57,7 @@ pub const Repl = struct {
     pub fn deinit(self: *Repl) void {
         self.buffer.deinit();
         self.history.deinit();
+        self.segments.deinit(self.allocator);
     }
 
     /// Handle a key event, returns action to take
@@ -157,6 +179,8 @@ pub const Repl = struct {
         // Clear buffer for next input
         self.buffer.clear();
         self.history.resetNavigation();
+        self.segments.clearRetainingCapacity();
+        self.in_paste = false;
 
         return text;
     }
@@ -180,6 +204,57 @@ pub const Repl = struct {
     pub fn cancel(self: *Repl) void {
         self.buffer.clear();
         self.history.resetNavigation();
+        self.segments.clearRetainingCapacity();
+        self.in_paste = false;
+    }
+
+    /// Called when paste starts (ESC[200~)
+    pub fn pasteStart(self: *Repl) void {
+        self.in_paste = true;
+        // Start a new pasted segment at current position
+        const pos = self.buffer.len();
+        self.segments.append(self.allocator, .{
+            .kind = .pasted,
+            .start = pos,
+            .end = pos,
+        }) catch {};
+    }
+
+    /// Called when paste ends (ESC[201~)
+    pub fn pasteEnd(self: *Repl) void {
+        self.in_paste = false;
+        // Finalize the pasted segment
+        if (self.segments.items.len > 0) {
+            const last = &self.segments.items[self.segments.items.len - 1];
+            if (last.kind == .pasted) {
+                last.end = self.buffer.len();
+            }
+        }
+    }
+
+    /// Check if a position is within a pasted segment
+    pub fn isPasted(self: *const Repl, pos: usize) bool {
+        for (self.segments.items) |seg| {
+            if (seg.kind == .pasted and pos >= seg.start and pos < seg.end) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Count newlines in pasted segments (for "[N lines]" display)
+    pub fn countPastedNewlines(self: *const Repl, text: []const u8) usize {
+        var count: usize = 0;
+        for (self.segments.items) |seg| {
+            if (seg.kind == .pasted) {
+                const start = @min(seg.start, text.len);
+                const end = @min(seg.end, text.len);
+                for (text[start..end]) |c| {
+                    if (c == '\n') count += 1;
+                }
+            }
+        }
+        return count;
     }
 
     /// Generate draw commands to render the input line
@@ -579,4 +654,47 @@ test "view renders to MemoryBackend" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("> hello", line);
+}
+
+test "paste segments tracking" {
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type "hello "
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'e' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    _ = try repl.handleKey(.{ .char = ' ' });
+
+    // Simulate paste of "world\nfoo"
+    repl.pasteStart();
+    _ = try repl.handleKey(.{ .char = 'w' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    _ = try repl.handleKey(.{ .char = 'r' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'd' });
+    _ = try repl.handleKey(.{ .char = '\n' });
+    _ = try repl.handleKey(.{ .char = 'f' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    repl.pasteEnd();
+
+    // Should have one pasted segment
+    try std.testing.expectEqual(@as(usize, 1), repl.segments.items.len);
+    try std.testing.expectEqual(SegmentKind.pasted, repl.segments.items[0].kind);
+    try std.testing.expectEqual(@as(usize, 6), repl.segments.items[0].start); // starts after "hello "
+    try std.testing.expectEqual(@as(usize, 15), repl.segments.items[0].end); // "world\nfoo" = 9 chars
+
+    // Check isPasted
+    try std.testing.expect(!repl.isPasted(5)); // "hello" not pasted
+    try std.testing.expect(repl.isPasted(6)); // start of paste
+    try std.testing.expect(repl.isPasted(10)); // middle of paste
+    try std.testing.expect(!repl.isPasted(15)); // end is exclusive
+
+    // Count newlines in pasted content
+    const text = try repl.getText();
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(@as(usize, 1), repl.countPastedNewlines(text));
 }

@@ -164,6 +164,13 @@ pub fn resetCursorColor() void {
     }
 }
 
+// Enable bracketed paste mode (sends ESC[200~ / ESC[201~ around pastes)
+pub fn enableBracketedPaste() void {
+    if (terminal_state) |*state| {
+        state.enableBracketedPaste();
+    }
+}
+
 // Move cursor to position using x,y coordinates (0-based)
 pub fn moveTo(x: u16, y: u16) !void {
     var writer = std.fs.File.stdout().writer(&stdout_buffer);
