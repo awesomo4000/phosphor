@@ -1,6 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const LineBuffer = @import("line_buffer.zig").LineBuffer;
+const phosphor = @import("phosphor");
+const DrawCommand = phosphor.DrawCommand;
 
 /// REPL widget - readline-style input with modern features
 pub const Repl = struct {
@@ -179,6 +181,74 @@ pub const Repl = struct {
         self.buffer.clear();
         self.history.resetNavigation();
     }
+
+    /// Generate draw commands to render the input line
+    /// The view renders at the specified row, returns commands and actual rows used
+    pub fn view(
+        self: *const Repl,
+        row: u16,
+        width: u16,
+        allocator: Allocator,
+    ) !ViewResult {
+        var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+        errdefer commands.deinit(allocator);
+
+        var text_allocs: std.ArrayListUnmanaged([]const u8) = .{};
+        errdefer {
+            for (text_allocs.items) |t| allocator.free(t);
+            text_allocs.deinit(allocator);
+        }
+
+        const text = try self.buffer.getText(allocator);
+        defer allocator.free(text);
+
+        const prompt = self.config.prompt;
+        const prompt_len: u16 = @intCast(@min(prompt.len, width));
+
+        // Move to row and clear line
+        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
+        try commands.append(allocator, .clear_line);
+
+        // Draw prompt
+        try commands.append(allocator, .{ .draw_text = .{ .text = prompt } });
+
+        // Draw text (simple single-line version)
+        const available_width = width -| prompt_len;
+        const cursor = self.buffer.cursor();
+
+        // For now, simple rendering: show text from start
+        const display_len = @min(text.len, available_width);
+        if (display_len > 0) {
+            // We need to allocate the text slice to survive the commands array
+            const text_copy = try allocator.dupe(u8, text[0..display_len]);
+            try text_allocs.append(allocator, text_copy);
+            try commands.append(allocator, .{ .draw_text = .{ .text = text_copy } });
+        }
+
+        // Position cursor
+        const cursor_x = prompt_len + @as(u16, @intCast(@min(cursor, available_width)));
+        try commands.append(allocator, .{ .move_cursor = .{ .x = cursor_x, .y = row } });
+
+        return .{
+            .commands = try commands.toOwnedSlice(allocator),
+            .rows_used = 1,
+            .text_allocs = try text_allocs.toOwnedSlice(allocator),
+        };
+    }
+
+    pub const ViewResult = struct {
+        commands: []DrawCommand,
+        rows_used: u16,
+        text_allocs: [][]const u8, // Text allocations to free
+
+        pub fn deinit(self: *ViewResult, allocator: Allocator) void {
+            for (self.text_allocs) |t| {
+                allocator.free(t);
+            }
+            allocator.free(self.text_allocs);
+            allocator.free(self.commands);
+        }
+    };
 
     pub const Action = enum {
         none,
@@ -454,4 +524,59 @@ test "full session simulation without TTY" {
 
     // 8. Verify history was saved
     try std.testing.expectEqual(@as(usize, 1), repl.history.count());
+}
+
+test "view generates draw commands" {
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type some text
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'i' });
+
+    // Get view commands
+    var result = try repl.view(10, 80, std.testing.allocator);
+    defer result.deinit(std.testing.allocator);
+
+    // Should have commands: move_cursor, clear_line, draw_text (prompt), draw_text (input), move_cursor
+    try std.testing.expect(result.commands.len >= 4);
+    try std.testing.expectEqual(@as(u16, 1), result.rows_used);
+
+    // First command should be move_cursor to row 10
+    try std.testing.expectEqual(DrawCommand{ .move_cursor = .{ .x = 0, .y = 10 } }, result.commands[0]);
+
+    // Second should be clear_line
+    try std.testing.expectEqual(DrawCommand.clear_line, result.commands[1]);
+}
+
+test "view renders to MemoryBackend" {
+    const MemoryBackend = phosphor.MemoryBackend;
+
+    // Create REPL
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type "hello"
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'e' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+
+    // Create memory backend
+    var mem = try MemoryBackend.init(std.testing.allocator, 40, 10);
+    defer mem.deinit();
+
+    // Get view commands and execute on memory backend
+    var result = try repl.view(0, 40, std.testing.allocator);
+    defer result.deinit(std.testing.allocator);
+
+    const backend = mem.backend();
+    backend.execute(result.commands);
+
+    // Verify the rendered output
+    const line = try mem.getLine(0, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("> hello", line);
 }

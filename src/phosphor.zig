@@ -8,10 +8,24 @@
 pub const tui = @import("tui.zig");
 pub const TerminalState = @import("terminal_state.zig").TerminalState;
 
+// Render command system (functional core)
+pub const render_commands = @import("render_commands.zig");
+pub const DrawCommand = render_commands.DrawCommand;
+pub const Color = render_commands.Color;
+
+// Backend abstraction (imperative shell)
+pub const backend = @import("backend.zig");
+pub const Backend = backend.Backend;
+pub const Event = backend.Event;
+pub const Key = backend.Key;
+pub const Size = backend.Size;
+pub const TerminalBackend = backend.TerminalBackend;
+pub const MemoryBackend = backend.MemoryBackend;
+
+// Runtime (event loop)
+pub const runtime = @import("runtime.zig");
+pub const Runtime = runtime.Runtime;
+pub const Widget = runtime.Widget;
+
 // Version info
 pub const version = "0.1.0";
-
-// TODO: Add back when ready:
-// pub const app = @import("app.zig");
-// pub const runtime = @import("runtime.zig");
-// pub const thermite = @import("thermite");
