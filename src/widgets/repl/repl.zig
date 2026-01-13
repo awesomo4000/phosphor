@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const LineBuffer = @import("line_buffer.zig").LineBuffer;
 const phosphor = @import("phosphor");
 const DrawCommand = phosphor.DrawCommand;
+const Key = phosphor.Key;
 
 /// Segment kind - distinguishes typed input from pasted content
 pub const SegmentKind = enum {
@@ -334,35 +335,6 @@ pub const Repl = struct {
         clear_screen,
     };
 
-    pub const Key = union(enum) {
-        char: u21,
-        enter,
-        backspace,
-        delete,
-        tab,
-        escape,
-        up,
-        down,
-        left,
-        right,
-        home,
-        end,
-        ctrl_a,
-        ctrl_c,
-        ctrl_d,
-        ctrl_e,
-        ctrl_k,
-        ctrl_l,
-        ctrl_u,
-        ctrl_w,
-        ctrl_left,
-        ctrl_right,
-        ctrl_o, // Insert newline (open line)
-        shift_enter, // Shift+Enter (kitty protocol)
-        alt_enter, // Alt+Enter
-        unknown,
-
-    };
 };
 
 /// Simple history with navigation
