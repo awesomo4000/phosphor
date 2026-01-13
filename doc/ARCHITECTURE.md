@@ -141,6 +141,114 @@ Focus is handled through the subscription system:
 5. Runtime re-collects subscriptions
 6. Keys now routed to newly focused widget
 
+### Runtime Subscription Management
+
+The runtime calls `subscriptions()` on each widget to build a routing table:
+
+```zig
+const SubscriptionManager = struct {
+    keyboard_subscribers: std.ArrayList(*Widget),
+    focus_subscribers: std.ArrayList(*Widget),
+    tick_subscribers: std.ArrayList(TickSubscription),
+
+    const TickSubscription = struct {
+        widget: *Widget,
+        interval_ms: u32,
+        last_tick: i64,
+    };
+
+    /// Called after every update cycle to refresh subscriptions
+    pub fn collect(self: *SubscriptionManager, widgets: []Widget) void {
+        self.keyboard_subscribers.clearRetainingCapacity();
+        self.focus_subscribers.clearRetainingCapacity();
+        self.tick_subscribers.clearRetainingCapacity();
+
+        for (widgets) |*widget| {
+            for (widget.subscriptions()) |sub| {
+                switch (sub) {
+                    .keyboard => self.keyboard_subscribers.append(widget),
+                    .focus => self.focus_subscribers.append(widget),
+                    .tick_ms => |interval| self.tick_subscribers.append(.{
+                        .widget = widget,
+                        .interval_ms = interval,
+                        .last_tick = std.time.milliTimestamp(),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Route an event to subscribed widgets
+    pub fn route(self: *SubscriptionManager, msg: Msg) []const *Widget {
+        return switch (msg) {
+            .key => self.keyboard_subscribers.items,
+            .focus_gained, .focus_lost => self.focus_subscribers.items,
+            .tick => self.getTickTargets(),
+            else => &.{},
+        };
+    }
+
+    /// Check which widgets need tick messages
+    fn getTickTargets(self: *SubscriptionManager) []*Widget {
+        const now = std.time.milliTimestamp();
+        var targets: std.ArrayList(*Widget) = .{};
+
+        for (self.tick_subscribers.items) |*sub| {
+            if (now - sub.last_tick >= sub.interval_ms) {
+                targets.append(sub.widget);
+                sub.last_tick = now;
+            }
+        }
+        return targets.items;
+    }
+};
+```
+
+### Subscription Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    SUBSCRIPTION FLOW                         │
+│                                                             │
+│  1. App starts                                              │
+│     └─▶ Runtime calls widget.subscriptions() for each       │
+│         └─▶ Builds initial routing table                    │
+│                                                             │
+│  2. Event arrives (key press, timer, etc.)                  │
+│     └─▶ Runtime looks up subscribers for event type         │
+│         └─▶ Dispatches to each subscribed widget            │
+│                                                             │
+│  3. Widget.update() may change state                        │
+│     └─▶ State change may affect subscriptions()             │
+│         (e.g., focused widget now wants .keyboard)          │
+│                                                             │
+│  4. After update cycle                                      │
+│     └─▶ Runtime re-collects subscriptions                   │
+│         └─▶ Routing table updated for next event            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Multiple Subscribers
+
+Multiple widgets can subscribe to the same event type:
+
+```zig
+// Both widgets receive every key event
+const Editor = struct {
+    pub fn subscriptions(self: *const Editor) []Sub {
+        return &.{ .keyboard };
+    }
+};
+
+const StatusBar = struct {
+    pub fn subscriptions(self: *const StatusBar) []Sub {
+        return &.{ .keyboard };  // Shows key in status
+    }
+};
+
+// Runtime dispatches to both - order determined by widget tree
+```
+
 ## Commands (Effects)
 
 Widgets don't perform side effects. They return descriptions of effects.
