@@ -437,6 +437,117 @@ fn appendInput(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Declarative View (new approach)
+// ─────────────────────────────────────────────────────────────
+
+const DeclarativeViewResult = struct {
+    commands: []DrawCommand,
+    cursor_x: u16,
+    cursor_y: u16,
+    // Allocations to free
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *DeclarativeViewResult) void {
+        self.arena.deinit();
+    }
+};
+
+fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !DeclarativeViewResult {
+    // Use arena for frame allocations - everything freed together at end
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+
+    const bounds = calcBounds(model);
+    const log_height = bounds.log_end - bounds.log_start + 1;
+
+    // Build widget view trees
+    var log_view = try model.log.viewTree(log_height, alloc);
+    var repl_view = try model.repl.viewTree(alloc);
+
+    // Build size indicator text
+    const size_text = try std.fmt.allocPrint(alloc, "{d}x{d}", .{ model.size.cols, model.size.rows });
+
+    // Build separator
+    const separator = try alloc.alloc(u8, model.size.cols * 3);
+    var sep_idx: usize = 0;
+    for (0..model.size.cols) |_| {
+        separator[sep_idx] = 0xe2;
+        separator[sep_idx + 1] = 0x94;
+        separator[sep_idx + 2] = 0x80;
+        sep_idx += 3;
+    }
+
+    // Build the layout tree:
+    // vbox [
+    //   hbox [ title: grow | size: fit ]    -- row 0
+    //   separator                            -- row 1
+    //   log: grow                            -- rows 2..n-1
+    //   repl: fit                            -- bottom
+    // ]
+
+    const title_text = "Phosphor REPL Demo";
+
+    // Header row: title + size indicator
+    const header_children = try alloc.alloc(LayoutNode, 3);
+    header_children[0] = LayoutNode.text(title_text);
+    header_children[1] = phosphor.Spacer.node();
+    header_children[2] = LayoutNode.text(size_text);
+
+    var header_row = LayoutNode.hbox(header_children);
+    header_row.sizing.h = .{ .fixed = 1 };
+
+    // Separator row
+    var sep_row = LayoutNode.text(separator[0..sep_idx]);
+    sep_row.sizing.h = .{ .fixed = 1 };
+
+    // Log section
+    var log_node = log_view.build();
+    log_node.sizing.h = .{ .grow = .{} };
+
+    // REPL input
+    var repl_node = repl_view.build();
+    repl_node.sizing.h = .{ .fixed = 1 };
+
+    // Root vbox
+    const root_children = try alloc.alloc(LayoutNode, 4);
+    root_children[0] = header_row;
+    root_children[1] = sep_row;
+    root_children[2] = log_node;
+    root_children[3] = repl_node;
+
+    const root = LayoutNode.vbox(root_children);
+
+    // Render the tree to commands
+    const full_bounds = Rect{ .x = 0, .y = 0, .w = model.size.cols, .h = model.size.rows };
+
+    var commands_list: std.ArrayListUnmanaged(DrawCommand) = .{};
+
+    // Add clear_screen at start
+    try commands_list.append(alloc, .clear_screen);
+
+    // Render the tree
+    const tree_commands = try renderTree(&root, full_bounds, alloc);
+    try commands_list.appendSlice(alloc, tree_commands);
+
+    // Calculate cursor position (prompt_len + cursor_pos on the last row)
+    const cursor_x = repl_view.getCursorX();
+    const cursor_y = model.size.rows - 1;
+
+    // Add cursor and flush
+    try commands_list.append(alloc, .{ .move_cursor = .{ .x = cursor_x, .y = cursor_y } });
+    try commands_list.append(alloc, .{ .show_cursor = .{ .visible = true } });
+    try commands_list.append(alloc, .flush);
+
+    return .{
+        .commands = try commands_list.toOwnedSlice(alloc),
+        .cursor_x = cursor_x,
+        .cursor_y = cursor_y,
+        .arena = arena,
+    };
+}
+
+// ─────────────────────────────────────────────────────────────
 // Main - wire it all together
 // ─────────────────────────────────────────────────────────────
 
@@ -454,10 +565,10 @@ pub fn main() !void {
     var model = try Model.init(allocator, backend.getSize());
     defer model.deinit();
 
-    // Initial render
+    // Initial render (using new declarative view)
     {
-        var result = try view(&model, allocator);
-        defer result.deinit(allocator);
+        var result = try viewDeclarative(&model, allocator);
+        defer result.deinit();
         backend.execute(result.commands);
     }
 
@@ -475,9 +586,9 @@ pub fn main() !void {
         const msg = eventToMsg(maybe_event.?);
         try update(&model, msg);
 
-        // Re-render full view, Thermite only outputs changed cells
-        var result = try view(&model, allocator);
-        defer result.deinit(allocator);
+        // Re-render full view using declarative approach
+        var result = try viewDeclarative(&model, allocator);
+        defer result.deinit();
         backend.execute(result.commands);
     }
 }

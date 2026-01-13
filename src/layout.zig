@@ -118,7 +118,7 @@ pub const LayoutNode = struct {
     content: Content,
 
     pub const Content = union(enum) {
-        /// Leaf node with a widget
+        /// Leaf node with a widget (legacy vtable approach)
         widget: WidgetVTable,
 
         /// Branch node with children
@@ -126,6 +126,25 @@ pub const LayoutNode = struct {
 
         /// Empty placeholder
         empty,
+
+        // ─────────────────────────────────────────────────────────────
+        // Declarative node types (new approach)
+        // ─────────────────────────────────────────────────────────────
+
+        /// Simple text content
+        text: []const u8,
+
+        /// Cursor position marker - runtime will position cursor here
+        cursor,
+
+        /// Styled content - applies fg/bg color to child
+        styled: StyledContent,
+
+        pub const StyledContent = struct {
+            fg: ?u32 = null,
+            bg: ?u32 = null,
+            child: *const LayoutNode,
+        };
     };
 
     /// Create a leaf node from a widget
@@ -151,6 +170,33 @@ pub const LayoutNode = struct {
     /// Create a horizontal container
     pub fn hbox(children: []const LayoutNode) LayoutNode {
         return .{ .direction = .horizontal, .content = .{ .children = children } };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Declarative node constructors
+    // ─────────────────────────────────────────────────────────────
+
+    /// Create a text node
+    pub fn text(str: []const u8) LayoutNode {
+        return .{
+            .sizing = .{ .w = .{ .fit = .{} }, .h = .{ .fixed = 1 } },
+            .content = .{ .text = str },
+        };
+    }
+
+    /// Create a cursor marker node
+    pub fn cursorNode() LayoutNode {
+        return .{
+            .sizing = .{ .w = .{ .fixed = 0 }, .h = .{ .fixed = 0 } },
+            .content = .cursor,
+        };
+    }
+
+    /// Create a styled wrapper
+    pub fn styled(fg: ?u32, bg: ?u32, child: *const LayoutNode) LayoutNode {
+        return .{
+            .content = .{ .styled = .{ .fg = fg, .bg = bg, .child = child } },
+        };
     }
 };
 
@@ -184,7 +230,7 @@ fn renderNode(
 
     switch (node.content) {
         .widget => |widget| {
-            // Leaf: render the widget
+            // Leaf: render the widget (legacy vtable approach)
             const widget_commands = try widget.view(content_bounds, allocator);
             defer allocator.free(widget_commands);
             try commands.appendSlice(allocator, widget_commands);
@@ -199,7 +245,53 @@ fn renderNode(
             }
         },
         .empty => {},
+
+        // ─────────────────────────────────────────────────────────────
+        // Declarative node rendering
+        // ─────────────────────────────────────────────────────────────
+
+        .text => |str| {
+            // Render text at current position
+            try commands.append(allocator, .{ .move_cursor = .{ .x = content_bounds.x, .y = content_bounds.y } });
+            const display_len = @min(str.len, content_bounds.w);
+            if (display_len > 0) {
+                try commands.append(allocator, .{ .draw_text = .{ .text = str[0..display_len] } });
+            }
+        },
+        .cursor => {
+            // Mark cursor position - runtime will show cursor here
+            try commands.append(allocator, .{ .move_cursor = .{ .x = content_bounds.x, .y = content_bounds.y } });
+            try commands.append(allocator, .{ .show_cursor = .{ .visible = true } });
+        },
+        .styled => |style| {
+            // Apply colors, render child, reset
+            if (style.fg != null or style.bg != null) {
+                try commands.append(allocator, .{ .set_color = .{
+                    .fg = if (style.fg) |fg| colorFromU32(fg) else null,
+                    .bg = if (style.bg) |bg| colorFromU32(bg) else null,
+                } });
+            }
+            try renderNode(style.child, content_bounds, allocator, commands);
+            if (style.fg != null or style.bg != null) {
+                try commands.append(allocator, .reset_attributes);
+            }
+        },
     }
+}
+
+/// Convert u32 RGB to Color enum (finds closest match)
+fn colorFromU32(rgb: u32) render_commands.Color {
+    // For now, just map to basic colors - could do better matching later
+    const r: u8 = @truncate(rgb >> 16);
+    const g: u8 = @truncate(rgb >> 8);
+    const b: u8 = @truncate(rgb);
+
+    // Simple brightness-based mapping
+    const brightness = (@as(u16, r) + @as(u16, g) + @as(u16, b)) / 3;
+
+    if (brightness < 64) return .black;
+    if (brightness < 192) return .light_gray;
+    return .white;
 }
 
 /// Calculate bounds for each child based on sizing rules
@@ -314,6 +406,19 @@ fn getPreferredSize(node: *const LayoutNode, available: Rect, is_vertical: bool)
             return total + gaps + node.padding.vertical();
         },
         .empty => return 0,
+
+        // Declarative nodes
+        .text => |str| {
+            if (is_vertical) {
+                return 1; // Text is single line
+            } else {
+                return @intCast(@min(str.len, 65535));
+            }
+        },
+        .cursor => return 0, // Cursor has no size
+        .styled => |style| {
+            return getPreferredSize(style.child, available, is_vertical);
+        },
     }
 }
 

@@ -4,6 +4,7 @@ const LineBuffer = @import("line_buffer.zig").LineBuffer;
 const phosphor = @import("phosphor");
 const DrawCommand = phosphor.DrawCommand;
 const Key = phosphor.Key;
+const LayoutNode = phosphor.LayoutNode;
 
 /// Segment kind - distinguishes typed input from pasted content
 pub const SegmentKind = enum {
@@ -335,6 +336,56 @@ pub const Repl = struct {
         clear_screen,
     };
 
+    // ─────────────────────────────────────────────────────────────
+    // New declarative view (returns LayoutNode tree)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Returns a declarative layout tree describing the REPL
+    /// Allocator is used for text that needs to be copied (frame lifetime)
+    pub fn viewTree(self: *const Repl, frame_alloc: Allocator) !ViewTree {
+        // Get text - this allocation lives for the frame
+        const text = try self.buffer.getText(frame_alloc);
+        const cursor_pos = self.buffer.cursor();
+        const prompt = self.config.prompt;
+
+        // Allocate children array on frame allocator (survives function return)
+        const children = try frame_alloc.alloc(LayoutNode, 3);
+        children[0] = LayoutNode.text(prompt);
+        children[1] = LayoutNode.text(text);
+        children[2] = LayoutNode.cursorNode();
+
+        return ViewTree{
+            .frame_alloc = frame_alloc,
+            .text = text,
+            .prompt = prompt,
+            .cursor_pos = cursor_pos,
+            .children = children,
+        };
+    }
+
+    pub const ViewTree = struct {
+        frame_alloc: Allocator,
+        text: []const u8,
+        prompt: []const u8,
+        cursor_pos: usize,
+        children: []LayoutNode, // Allocated on frame_alloc
+
+        /// Build the actual LayoutNode tree
+        /// Returns an hbox with [prompt][text][cursor]
+        pub fn build(self: *const ViewTree) LayoutNode {
+            return LayoutNode.hbox(self.children);
+        }
+
+        /// Get cursor X position (prompt_len + cursor_pos)
+        pub fn getCursorX(self: *const ViewTree) u16 {
+            return @intCast(self.prompt.len + @min(self.cursor_pos, self.text.len));
+        }
+
+        pub fn deinit(self: *ViewTree) void {
+            self.frame_alloc.free(self.text);
+            self.frame_alloc.free(self.children);
+        }
+    };
 };
 
 /// Simple history with navigation

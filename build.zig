@@ -27,12 +27,13 @@ pub fn build(b: *std.Build) void {
     });
     repl.addImport("phosphor", phosphor);
 
-    // LogView module (scrolling log/chat widget)
-    _ = b.addModule("logview", .{
+    // LogView module (scrolling log/chat widget) - depends on phosphor for LayoutNode
+    const logview = b.addModule("logview", .{
         .root_source_file = b.path("src/widgets/logview/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    logview.addImport("phosphor", phosphor);
 
     // Tests
     const test_step = b.step("test", "Run all tests");

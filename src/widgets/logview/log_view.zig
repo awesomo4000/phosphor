@@ -1,5 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const phosphor = @import("phosphor");
+const LayoutNode = phosphor.LayoutNode;
 
 /// A scrolling log view widget - displays lines with newest at the bottom.
 /// Like a chat client or terminal output.
@@ -104,6 +106,42 @@ pub const LogView = struct {
             try writer.writeAll(line.text[0..display_len]);
         }
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // New declarative view (returns LayoutNode tree)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Returns a declarative layout tree for the log view.
+    /// view_height determines how many lines to show.
+    /// Returns a ViewTree that can build LayoutNodes.
+    pub fn viewTree(self: *const LogView, view_height: usize, frame_alloc: Allocator) !ViewTree {
+        const visible = self.getVisibleLines(view_height);
+
+        // Allocate array of LayoutNodes for each line
+        const line_nodes = try frame_alloc.alloc(LayoutNode, visible.len);
+        for (visible, 0..) |line, i| {
+            line_nodes[i] = LayoutNode.text(line.text);
+        }
+
+        return ViewTree{
+            .line_nodes = line_nodes,
+            .frame_alloc = frame_alloc,
+        };
+    }
+
+    pub const ViewTree = struct {
+        line_nodes: []LayoutNode,
+        frame_alloc: Allocator,
+
+        /// Build a vbox containing all visible lines
+        pub fn build(self: *const ViewTree) LayoutNode {
+            return LayoutNode.vbox(self.line_nodes);
+        }
+
+        pub fn deinit(self: *ViewTree) void {
+            self.frame_alloc.free(self.line_nodes);
+        }
+    };
 };
 
 // ─────────────────────────────────────────────────────────────
