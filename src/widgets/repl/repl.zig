@@ -415,63 +415,139 @@ pub const Repl = struct {
     // ─────────────────────────────────────────────────────────────
 
     /// Returns a declarative layout tree describing the REPL
-    /// Allocator is used for text that needs to be copied (frame lifetime)
-    pub fn viewTree(self: *const Repl, frame_alloc: Allocator) !ViewTree {
-        // Get text - this allocation lives for the frame
+    /// Width is needed for line wrapping
+    pub fn viewTree(self: *const Repl, width: u16, frame_alloc: Allocator) !ViewTree {
         const text = try self.buffer.getText(frame_alloc);
         const cursor_pos = self.buffer.cursor();
         const prompt = self.config.prompt;
         const continuation = "... ";
+        const wrap_indent = "    ";
 
-        // Count lines
-        var line_count: usize = 1;
-        for (text) |c| {
-            if (c == '\n') line_count += 1;
-        }
+        const prompt_len: u16 = @intCast(prompt.len);
+        const cont_len: u16 = @intCast(continuation.len);
+        const wrap_len: u16 = @intCast(wrap_indent.len);
 
-        // Calculate cursor row/col
+        // First pass: count total display rows and track cursor position
+        var total_rows: usize = 0;
         var cursor_row: usize = 0;
         var cursor_col: usize = 0;
-        var pos: usize = 0;
-        var col: usize = 0;
-        while (pos < text.len and pos < cursor_pos) : (pos += 1) {
-            if (text[pos] == '\n') {
-                cursor_row += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        cursor_col = col;
-
-        // Build line nodes
-        const line_nodes = try frame_alloc.alloc(LayoutNode, line_count);
-        var line_idx: usize = 0;
+        var char_idx: usize = 0;
+        var is_first_logical_line = true;
         var line_start: usize = 0;
 
-        for (text, 0..) |c, i| {
-            if (c == '\n') {
-                const prefix = if (line_idx == 0) prompt else continuation;
+        // Process each logical line (split by \n)
+        var i: usize = 0;
+        while (i <= text.len) : (i += 1) {
+            const is_newline = i < text.len and text[i] == '\n';
+            const is_end = i == text.len;
+
+            if (is_newline or is_end) {
                 const line_text = text[line_start..i];
+                const prefix_len = if (is_first_logical_line) prompt_len else cont_len;
+                const content_width = if (width > prefix_len) width - prefix_len else 1;
+                const wrap_content_width = if (width > wrap_len) width - wrap_len else 1;
 
-                // Create hbox for this line: [prefix][text]
-                const row_children = try frame_alloc.alloc(LayoutNode, 2);
-                row_children[0] = LayoutNode.text(prefix);
-                row_children[1] = LayoutNode.text(line_text);
-                line_nodes[line_idx] = LayoutNode.hbox(row_children);
+                // Count rows for this logical line
+                if (line_text.len == 0) {
+                    // Empty line = 1 row
+                    if (cursor_pos >= char_idx and cursor_pos <= char_idx) {
+                        cursor_row = total_rows;
+                        cursor_col = prefix_len;
+                    }
+                    total_rows += 1;
+                } else {
+                    var remaining = line_text.len;
+                    var first_segment = true;
+                    var segment_start: usize = 0;
 
-                line_idx += 1;
+                    while (remaining > 0) {
+                        const seg_width = if (first_segment) content_width else wrap_content_width;
+                        const seg_len = @min(remaining, seg_width);
+                        const seg_prefix_len = if (first_segment) prefix_len else wrap_len;
+
+                        // Check if cursor is in this segment
+                        const seg_char_start = char_idx + segment_start;
+                        const seg_char_end = seg_char_start + seg_len;
+                        if (cursor_pos >= seg_char_start and cursor_pos <= seg_char_end) {
+                            cursor_row = total_rows;
+                            cursor_col = seg_prefix_len + (cursor_pos - seg_char_start);
+                        }
+
+                        total_rows += 1;
+                        segment_start += seg_len;
+                        remaining -= seg_len;
+                        first_segment = false;
+                    }
+                }
+
+                char_idx += line_text.len;
+                if (is_newline) {
+                    // Cursor right after newline
+                    if (cursor_pos == char_idx) {
+                        cursor_row = total_rows;
+                        cursor_col = cont_len;
+                    }
+                    char_idx += 1; // Count the newline
+                }
+
                 line_start = i + 1;
+                is_first_logical_line = false;
             }
         }
 
-        // Last line (or only line if no newlines)
-        const prefix = if (line_idx == 0) prompt else continuation;
-        const line_text = text[line_start..];
-        const row_children = try frame_alloc.alloc(LayoutNode, 2);
-        row_children[0] = LayoutNode.text(prefix);
-        row_children[1] = LayoutNode.text(line_text);
-        line_nodes[line_idx] = LayoutNode.hbox(row_children);
+        if (total_rows == 0) total_rows = 1;
+
+        // Second pass: build layout nodes
+        const line_nodes = try frame_alloc.alloc(LayoutNode, total_rows);
+        var row_idx: usize = 0;
+        is_first_logical_line = true;
+        line_start = 0;
+
+        i = 0;
+        while (i <= text.len) : (i += 1) {
+            const is_newline = i < text.len and text[i] == '\n';
+            const is_end = i == text.len;
+
+            if (is_newline or is_end) {
+                const line_text = text[line_start..i];
+                const prefix = if (is_first_logical_line) prompt else continuation;
+                const prefix_len = if (is_first_logical_line) prompt_len else cont_len;
+                const content_width = if (width > prefix_len) width - prefix_len else 1;
+                const wrap_content_width = if (width > wrap_len) width - wrap_len else 1;
+
+                if (line_text.len == 0) {
+                    // Empty line
+                    const row_children = try frame_alloc.alloc(LayoutNode, 2);
+                    row_children[0] = LayoutNode.text(prefix);
+                    row_children[1] = LayoutNode.text("");
+                    line_nodes[row_idx] = LayoutNode.hbox(row_children);
+                    row_idx += 1;
+                } else {
+                    var remaining: usize = line_text.len;
+                    var seg_start: usize = 0;
+                    var first_segment = true;
+
+                    while (remaining > 0) {
+                        const seg_width = if (first_segment) content_width else wrap_content_width;
+                        const seg_len = @min(remaining, seg_width);
+                        const seg_prefix = if (first_segment) prefix else wrap_indent;
+
+                        const row_children = try frame_alloc.alloc(LayoutNode, 2);
+                        row_children[0] = LayoutNode.text(seg_prefix);
+                        row_children[1] = LayoutNode.text(line_text[seg_start .. seg_start + seg_len]);
+                        line_nodes[row_idx] = LayoutNode.hbox(row_children);
+
+                        row_idx += 1;
+                        seg_start += seg_len;
+                        remaining -= seg_len;
+                        first_segment = false;
+                    }
+                }
+
+                line_start = i + 1;
+                is_first_logical_line = false;
+            }
+        }
 
         return ViewTree{
             .frame_alloc = frame_alloc,
@@ -480,7 +556,7 @@ pub const Repl = struct {
             .cursor_pos = cursor_pos,
             .cursor_row = cursor_row,
             .cursor_col = cursor_col,
-            .line_count = line_count,
+            .line_count = total_rows,
             .line_nodes = line_nodes,
         };
     }
@@ -504,10 +580,9 @@ pub const Repl = struct {
             return LayoutNode.vbox(self.line_nodes);
         }
 
-        /// Get cursor X position (prefix_len + cursor_col)
+        /// Get cursor X position (already includes prefix from viewTree calculation)
         pub fn getCursorX(self: *const ViewTree) u16 {
-            const prefix_len = if (self.cursor_row == 0) self.prompt.len else 4; // "... "
-            return @intCast(prefix_len + self.cursor_col);
+            return @intCast(self.cursor_col);
         }
 
         /// Get cursor Y offset from start of repl area

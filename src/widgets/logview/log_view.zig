@@ -31,7 +31,16 @@ pub const LogView = struct {
     }
 
     /// Append a line to the log. If at capacity, oldest line is removed.
+    /// If text contains newlines, splits into multiple lines.
     pub fn append(self: *LogView, text: []const u8) !void {
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        while (iter.next()) |line| {
+            try self.appendSingleLine(line);
+        }
+    }
+
+    /// Append a single line (no newline handling)
+    fn appendSingleLine(self: *LogView, text: []const u8) !void {
         // If at capacity, remove oldest
         if (self.lines.items.len >= self.capacity) {
             const removed = self.lines.orderedRemove(0);
@@ -43,18 +52,15 @@ pub const LogView = struct {
         try self.lines.append(self.allocator, .{ .text = text_copy });
     }
 
-    /// Append a formatted line
+    /// Append a formatted line. Splits on newlines.
     pub fn print(self: *LogView, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.allocPrint(self.allocator, fmt, args);
-        errdefer self.allocator.free(text);
+        defer self.allocator.free(text);
 
-        // If at capacity, remove oldest
-        if (self.lines.items.len >= self.capacity) {
-            const removed = self.lines.orderedRemove(0);
-            self.allocator.free(removed.text);
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        while (iter.next()) |line| {
+            try self.appendSingleLine(line);
         }
-
-        try self.lines.append(self.allocator, .{ .text = text });
     }
 
     /// Clear all lines
@@ -112,34 +118,63 @@ pub const LogView = struct {
     // ─────────────────────────────────────────────────────────────
 
     /// Returns a declarative layout tree for the log view.
-    /// view_height determines how many lines to show.
+    /// Width is used for wrapping long lines.
     /// Returns a ViewTree that can build LayoutNodes.
-    pub fn viewTree(self: *const LogView, view_height: usize, frame_alloc: Allocator) !ViewTree {
-        const visible = self.getVisibleLines(view_height);
+    pub fn viewTree(self: *const LogView, width: u16, frame_alloc: Allocator) !ViewTree {
+        const visible = self.getVisibleLines(self.lines.items.len);
 
-        // Allocate array of LayoutNodes for each line
-        const line_nodes = try frame_alloc.alloc(LayoutNode, visible.len);
-        for (visible, 0..) |line, i| {
-            line_nodes[i] = LayoutNode.text(line.text);
+        // First pass: count total rows needed (including wrapped lines)
+        var total_rows: usize = 0;
+        for (visible) |line| {
+            total_rows += countWrappedRows(line.text, width);
+        }
+
+        // Build vbox children: [spacer, ...wrapped rows]
+        const children = try frame_alloc.alloc(LayoutNode, total_rows + 1);
+
+        // First child is a spacer that grows to fill empty space
+        children[0] = phosphor.Spacer.node();
+
+        // Add wrapped line segments
+        var row_idx: usize = 1;
+        for (visible) |line| {
+            var remaining = line.text;
+            while (remaining.len > 0) {
+                const segment_len = @min(remaining.len, width);
+                children[row_idx] = LayoutNode.text(remaining[0..segment_len]);
+                remaining = remaining[segment_len..];
+                row_idx += 1;
+            }
+            // Handle empty lines
+            if (line.text.len == 0) {
+                children[row_idx] = LayoutNode.text("");
+                row_idx += 1;
+            }
         }
 
         return ViewTree{
-            .line_nodes = line_nodes,
+            .children = children,
             .frame_alloc = frame_alloc,
         };
     }
 
+    /// Count how many rows a line needs when wrapped at given width
+    fn countWrappedRows(text: []const u8, width: u16) usize {
+        if (text.len == 0) return 1;
+        return (text.len + width - 1) / width; // Ceiling division
+    }
+
     pub const ViewTree = struct {
-        line_nodes: []LayoutNode,
+        children: []LayoutNode,
         frame_alloc: Allocator,
 
-        /// Build a vbox containing all visible lines
+        /// Build a vbox containing spacer + visible lines (bottom-aligned)
         pub fn build(self: *const ViewTree) LayoutNode {
-            return LayoutNode.vbox(self.line_nodes);
+            return LayoutNode.vbox(self.children);
         }
 
         pub fn deinit(self: *ViewTree) void {
-            self.frame_alloc.free(self.line_nodes);
+            self.frame_alloc.free(self.children);
         }
     };
 };

@@ -172,17 +172,26 @@ fn handleReplMsg(model: *Model, repl_msg: Repl.ReplMsg) !void {
 }
 
 fn handleCommand(model: *Model, text: []const u8) !void {
-    if (std.mem.eql(u8, text, "clear")) {
+    // Trim whitespace for command matching
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+
+    if (std.mem.eql(u8, trimmed, "clear")) {
         model.log.clear();
         try model.log.append("Screen cleared.");
-    } else if (std.mem.eql(u8, text, "help")) {
+    } else if (std.mem.eql(u8, trimmed, "help")) {
         try model.log.append("Commands: help, clear, history, exit");
-    } else if (std.mem.eql(u8, text, "history")) {
+    } else if (std.mem.eql(u8, trimmed, "history")) {
         try model.log.print("History has {} entries", .{model.repl.history.count()});
-    } else if (std.mem.eql(u8, text, "exit")) {
+    } else if (std.mem.eql(u8, trimmed, "exit")) {
         model.running = false;
-    } else if (text.len > 0) {
-        try model.log.print("Unknown command: '{s}'. Type 'help' for commands.", .{text});
+    } else if (trimmed.len > 0) {
+        // Show first line only in error message for cleaner output
+        var first_line = trimmed;
+        if (std.mem.indexOfScalar(u8, trimmed, '\n')) |idx| {
+            first_line = trimmed[0..idx];
+        }
+        const suffix: []const u8 = if (first_line.len < trimmed.len) "..." else "";
+        try model.log.print("Unknown command: '{s}{s}'. Type 'help' for commands.", .{ first_line, suffix });
     }
 }
 
@@ -495,12 +504,9 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    const bounds = calcBounds(model);
-    const log_height = bounds.log_end - bounds.log_start + 1;
-
     // Build widget view trees
-    var log_view = try model.log.viewTree(log_height, alloc);
-    var repl_view = try model.repl.viewTree(alloc);
+    var log_view = try model.log.viewTree(model.size.cols, alloc);
+    var repl_view = try model.repl.viewTree(model.size.cols, alloc);
 
     // Build size indicator text
     const size_text = try std.fmt.allocPrint(alloc, "{d}x{d}", .{ model.size.cols, model.size.rows });
