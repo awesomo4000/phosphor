@@ -3,7 +3,7 @@ const lib = @import("thermite");
 const terminal = lib.terminal;
 
 /// Draw status bar at bottom of screen
-fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, angle: f32, is_paused: bool) void {
+fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused: bool, use_aa: bool) void {
     if (term_width < 20 or term_height < 5) return;
 
     var buf: [256]u8 = undefined;
@@ -14,13 +14,13 @@ fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, angle: f3
 
     // Build status text
     var status_buf: [200]u8 = undefined;
-    const status = if (term_width >= 70)
-        std.fmt.bufPrint(&status_buf, " {s: <7} | 4D Tesseract | FPS:{d:>3} | Angle:{d:>6.2} | [SPC]=pause [Q]=quit ", .{
-            if (is_paused) "PAUSED" else "RUNNING", fps, angle,
+    const status = if (term_width >= 80)
+        std.fmt.bufPrint(&status_buf, " {s: <7} | 4D Tesseract | FPS:{d:>3} | {s: <2} | [SPC]=pause [A]=aa [Q]=quit ", .{
+            if (is_paused) "PAUSED" else "RUNNING", fps, if (use_aa) "AA" else "  ",
         }) catch return
     else if (term_width >= 50)
-        std.fmt.bufPrint(&status_buf, " {s: <5} | FPS:{d:>3} | [SPC] [Q] ", .{
-            if (is_paused) "PAUSE" else "RUN", fps,
+        std.fmt.bufPrint(&status_buf, " {s: <5} | FPS:{d:>3} | {s} ", .{
+            if (is_paused) "PAUSE" else "RUN", fps, if (use_aa) "AA" else "  ",
         }) catch return
     else
         std.fmt.bufPrint(&status_buf, " {s} {d:>3}", .{
@@ -176,26 +176,176 @@ fn hslToRgb(hue: f32, sat: f32, light: f32) u32 {
     return (@as(u32, ri) << 24) | (@as(u32, gi) << 16) | (@as(u32, bi) << 8) | 0xFF;
 }
 
-/// Draw a line using Bresenham's algorithm
-fn drawLine(pixels: []u32, width: u32, height: u32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+/// Downsample a buffer by 2x (average each 2x2 block)
+fn downsample2x(src: []const u32, src_width: u32, src_height: u32, dst: []u32) void {
+    const dst_width = src_width / 2;
+    const dst_height = src_height / 2;
+
+    for (0..dst_height) |dy| {
+        for (0..dst_width) |dx| {
+            const sx = dx * 2;
+            const sy = dy * 2;
+
+            // Get 4 source pixels
+            const p00 = src[sy * src_width + sx];
+            const p10 = src[sy * src_width + sx + 1];
+            const p01 = src[(sy + 1) * src_width + sx];
+            const p11 = src[(sy + 1) * src_width + sx + 1];
+
+            // Average each channel
+            const r = (@as(u32, (p00 >> 24) & 0xFF) + @as(u32, (p10 >> 24) & 0xFF) +
+                @as(u32, (p01 >> 24) & 0xFF) + @as(u32, (p11 >> 24) & 0xFF)) / 4;
+            const g = (@as(u32, (p00 >> 16) & 0xFF) + @as(u32, (p10 >> 16) & 0xFF) +
+                @as(u32, (p01 >> 16) & 0xFF) + @as(u32, (p11 >> 16) & 0xFF)) / 4;
+            const b = (@as(u32, (p00 >> 8) & 0xFF) + @as(u32, (p10 >> 8) & 0xFF) +
+                @as(u32, (p01 >> 8) & 0xFF) + @as(u32, (p11 >> 8) & 0xFF)) / 4;
+
+            dst[dy * dst_width + dx] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
+        }
+    }
+}
+
+/// Blend a color onto a pixel with given alpha (0.0 = transparent, 1.0 = opaque)
+/// Uses boosted alpha so AA pixels stay closer to the line color
+fn blendPixel(pixels: []u32, width: u32, height: u32, x: i32, y: i32, color: u32, alpha: f32) void {
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return;
+
+    const idx = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+    const bg = pixels[idx];
+
+    // Boost alpha so AA pixels don't fade too much into background
+    // Maps 0.0-1.0 to 0.7-1.0 range
+    const boosted_alpha = 0.7 + alpha * 0.3;
+
+    // Extract color components (RGBA format)
+    const fg_r = @as(f32, @floatFromInt((color >> 24) & 0xFF));
+    const fg_g = @as(f32, @floatFromInt((color >> 16) & 0xFF));
+    const fg_b = @as(f32, @floatFromInt((color >> 8) & 0xFF));
+
+    const bg_r = @as(f32, @floatFromInt((bg >> 24) & 0xFF));
+    const bg_g = @as(f32, @floatFromInt((bg >> 16) & 0xFF));
+    const bg_b = @as(f32, @floatFromInt((bg >> 8) & 0xFF));
+
+    // Blend with boosted alpha
+    const r = @as(u8, @intFromFloat(bg_r + (fg_r - bg_r) * boosted_alpha));
+    const g = @as(u8, @intFromFloat(bg_g + (fg_g - bg_g) * boosted_alpha));
+    const b = @as(u8, @intFromFloat(bg_b + (fg_b - bg_b) * boosted_alpha));
+
+    pixels[idx] = (@as(u32, r) << 24) | (@as(u32, g) << 16) | (@as(u32, b) << 8) | 0xFF;
+}
+
+/// Draw a thick anti-aliased line (3 pixels wide to avoid gaps in terminal blocks)
+fn drawLineAA(pixels: []u32, width: u32, height: u32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
+    var fx0 = @as(f32, @floatFromInt(x0));
+    var fy0 = @as(f32, @floatFromInt(y0));
+    var fx1 = @as(f32, @floatFromInt(x1));
+    var fy1 = @as(f32, @floatFromInt(y1));
+
+    const steep = @abs(fy1 - fy0) > @abs(fx1 - fx0);
+
+    if (steep) {
+        std.mem.swap(f32, &fx0, &fy0);
+        std.mem.swap(f32, &fx1, &fy1);
+    }
+
+    if (fx0 > fx1) {
+        std.mem.swap(f32, &fx0, &fx1);
+        std.mem.swap(f32, &fy0, &fy1);
+    }
+
+    const dx = fx1 - fx0;
+    const dy = fy1 - fy0;
+    const gradient = if (dx < 0.0001) 1.0 else dy / dx;
+
+    // First endpoint
+    var xend = @round(fx0);
+    const yend = fy0 + gradient * (xend - fx0);
+    const xpxl1 = @as(i32, @intFromFloat(xend));
+
+    var intery = yend + gradient;
+
+    // Second endpoint
+    xend = @round(fx1);
+    const xpxl2 = @as(i32, @intFromFloat(xend));
+
+    // Main loop - draw 3 pixels per step for thickness
+    var x = xpxl1;
+    while (x <= xpxl2) : (x += 1) {
+        const iy = @as(i32, @intFromFloat(@round(intery)));
+        const frac = @abs(intery - @round(intery));
+
+        if (steep) {
+            // Draw center pixel at full, neighbors at partial
+            blendPixel(pixels, width, height, iy, x, color, 1.0);
+            blendPixel(pixels, width, height, iy - 1, x, color, 0.5 - frac * 0.5);
+            blendPixel(pixels, width, height, iy + 1, x, color, 0.5 - frac * 0.5);
+        } else {
+            blendPixel(pixels, width, height, x, iy, color, 1.0);
+            blendPixel(pixels, width, height, x, iy - 1, color, 0.5 - frac * 0.5);
+            blendPixel(pixels, width, height, x, iy + 1, color, 0.5 - frac * 0.5);
+        }
+
+        if (x >= xpxl1 and x < xpxl2) {
+            intery += gradient;
+        }
+    }
+}
+
+/// Draw an anti-aliased filled circle using distance-based blending
+fn drawCircleAA(pixels: []u32, width: u32, height: u32, cx: i32, cy: i32, radius: i32, color: u32) void {
+    const r = @as(f32, @floatFromInt(radius));
+    const r_outer = r + 1.0; // AA extends 1 pixel beyond radius
+
+    const r_outer_i = @as(i32, @intFromFloat(@ceil(r_outer)));
+
+    var dy: i32 = -r_outer_i;
+    while (dy <= r_outer_i) : (dy += 1) {
+        var dx: i32 = -r_outer_i;
+        while (dx <= r_outer_i) : (dx += 1) {
+            const fdx = @as(f32, @floatFromInt(dx));
+            const fdy = @as(f32, @floatFromInt(dy));
+            const dist = @sqrt(fdx * fdx + fdy * fdy);
+
+            if (dist <= r_outer) {
+                // Calculate alpha based on distance from edge
+                const alpha = if (dist <= r - 1.0)
+                    1.0 // Fully inside
+                else if (dist >= r)
+                    @max(0.0, 1.0 - (dist - r)) // Outside edge, fade out
+                else
+                    1.0; // Near edge inside
+
+                if (alpha > 0.0) {
+                    blendPixel(pixels, width, height, cx + dx, cy + dy, color, alpha);
+                }
+            }
+        }
+    }
+}
+
+/// Set a pixel directly (no blending)
+fn setPixel(pixels: []u32, width: u32, height: u32, x: i32, y: i32, color: u32) void {
+    if (x < 0 or y < 0 or x >= @as(i32, @intCast(width)) or y >= @as(i32, @intCast(height))) return;
+    const idx = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+    pixels[idx] = color;
+}
+
+/// Draw a simple line using Bresenham's algorithm (no AA)
+fn drawLineSimple(pixels: []u32, width: u32, height: u32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) void {
     var px0 = x0;
     var py0 = y0;
     const px1 = x1;
     const py1 = y1;
 
-    const dx: i32 = @intCast(@abs(px1 - px0));
-    const dy: i32 = @intCast(@abs(py1 - py0));
+    const dx: i32 = if (px1 > px0) px1 - px0 else px0 - px1;
+    const dy: i32 = if (py1 > py0) py1 - py0 else py0 - py1;
     const sx: i32 = if (px0 < px1) 1 else -1;
     const sy: i32 = if (py0 < py1) 1 else -1;
     var err = dx - dy;
 
     while (true) {
-        if (px0 >= 0 and py0 >= 0 and px0 < @as(i32, @intCast(width)) and py0 < @as(i32, @intCast(height))) {
-            pixels[@intCast(@as(u32, @intCast(py0)) * width + @as(u32, @intCast(px0)))] = color;
-        }
-
+        setPixel(pixels, width, height, px0, py0, color);
         if (px0 == px1 and py0 == py1) break;
-
         const e2 = 2 * err;
         if (e2 > -dy) {
             err -= dy;
@@ -208,18 +358,14 @@ fn drawLine(pixels: []u32, width: u32, height: u32, x0: i32, y0: i32, x1: i32, y
     }
 }
 
-/// Draw a filled circle
-fn drawCircle(pixels: []u32, width: u32, height: u32, cx: i32, cy: i32, radius: i32, color: u32) void {
-    for (0..@intCast(radius * 2 + 1)) |dy_u| {
-        const dy = @as(i32, @intCast(dy_u)) - radius;
-        for (0..@intCast(radius * 2 + 1)) |dx_u| {
-            const dx = @as(i32, @intCast(dx_u)) - radius;
+/// Draw a simple filled circle (no AA)
+fn drawCircleSimple(pixels: []u32, width: u32, height: u32, cx: i32, cy: i32, radius: i32, color: u32) void {
+    var dy: i32 = -radius;
+    while (dy <= radius) : (dy += 1) {
+        var dx: i32 = -radius;
+        while (dx <= radius) : (dx += 1) {
             if (dx * dx + dy * dy <= radius * radius) {
-                const px = cx + dx;
-                const py = cy + dy;
-                if (px >= 0 and py >= 0 and px < @as(i32, @intCast(width)) and py < @as(i32, @intCast(height))) {
-                    pixels[@intCast(@as(u32, @intCast(py)) * width + @as(u32, @intCast(px)))] = color;
-                }
+                setPixel(pixels, width, height, cx + dx, cy + dy, color);
             }
         }
     }
@@ -246,8 +392,15 @@ pub fn main() !void {
     var width: u32 = max_res.width;
     var height: u32 = max_res.height - 2;
 
+    // Output buffer (sent to renderer)
     var pixels = try allocator.alloc(u32, width * height);
     defer allocator.free(pixels);
+
+    // Render buffer (2x resolution for supersampling)
+    var render_width: u32 = width * 2;
+    var render_height: u32 = height * 2;
+    var render_pixels = try allocator.alloc(u32, render_width * render_height);
+    defer allocator.free(render_pixels);
 
     // Generate hypercube geometry
     const vertices = generateVertices();
@@ -257,6 +410,7 @@ pub fn main() !void {
     var angle: f32 = 0;
     var frame: u32 = 0;
     var is_paused = false;
+    var use_aa = true; // Toggle anti-aliasing with 'a' key
 
     // FPS tracking
     var fps: u32 = 0;
@@ -273,16 +427,21 @@ pub fn main() !void {
         if (terminal.readKey(term_fd)) |key| {
             if (key == 'q' or key == 3) break;
             if (key == ' ') is_paused = !is_paused;
+            if (key == 'a') use_aa = !use_aa;
         }
 
         // Check for terminal resize
         if (renderer.checkResize()) |new_res| {
             allocator.free(pixels);
+            allocator.free(render_pixels);
             width = new_res.width;
             height = new_res.height - 2;
             term_width = new_res.width / 2;
             term_height = new_res.height / 2;
             pixels = try allocator.alloc(u32, width * height);
+            render_width = width * 2;
+            render_height = height * 2;
+            render_pixels = try allocator.alloc(u32, render_width * render_height);
             renderer.clear();
             try renderer.present();
         }
@@ -297,26 +456,26 @@ pub fn main() !void {
 
         // If paused, update status bar and continue
         if (is_paused) {
-            drawStatusBar(term_fd, term_height, term_width, fps, angle, is_paused);
+            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, use_aa);
             std.Thread.sleep(50 * std.time.ns_per_ms);
             continue;
         }
 
         // Update status bar every 4 frames
         if (frame % 4 == 0) {
-            drawStatusBar(term_fd, term_height, term_width, fps, angle, is_paused);
+            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, use_aa);
         }
 
         // Count this frame
         frame += 1;
         fps_frame_count += 1;
 
-        // Clear with dark background
-        @memset(pixels, 0x101020FF);
+        // Clear render buffer (2x resolution) with dark background
+        @memset(render_pixels, 0x101020FF);
 
-        // Calculate projection parameters
-        const center_x = @as(f32, @floatFromInt(width)) / 2.0;
-        const center_y = @as(f32, @floatFromInt(height)) / 2.0;
+        // Calculate projection parameters at 2x scale
+        const center_x = @as(f32, @floatFromInt(render_width)) / 2.0;
+        const center_y = @as(f32, @floatFromInt(render_height)) / 2.0;
         const scale = @min(center_x, center_y) * 0.25;
 
         // Rotate and project all vertices
@@ -326,33 +485,53 @@ pub fn main() !void {
             projected[i] = project4Dto2D(rotated, center_x, center_y, scale);
         }
 
-        // Draw edges with colors based on angle
+        // Draw edges with full rainbow spread (to render buffer)
         for (edges, 0..) |edge, i| {
             const p1 = projected[edge[0]];
             const p2 = projected[edge[1]];
 
-            // Color based on angle for psychedelic effect
+            // Full rainbow - each edge gets different hue
             const hue = @mod(angle * 50.0 + @as(f32, @floatFromInt(i)) * 11.25, 360.0);
             const color = hslToRgb(hue, 0.7, 0.5);
 
-            drawLine(
-                pixels,
-                width,
-                height,
-                @intFromFloat(p1.x),
-                @intFromFloat(p1.y),
-                @intFromFloat(p2.x),
-                @intFromFloat(p2.y),
-                color,
-            );
+            if (use_aa) {
+                drawLineAA(
+                    render_pixels,
+                    render_width,
+                    render_height,
+                    @intFromFloat(p1.x),
+                    @intFromFloat(p1.y),
+                    @intFromFloat(p2.x),
+                    @intFromFloat(p2.y),
+                    color,
+                );
+            } else {
+                drawLineSimple(
+                    render_pixels,
+                    render_width,
+                    render_height,
+                    @intFromFloat(p1.x),
+                    @intFromFloat(p1.y),
+                    @intFromFloat(p2.x),
+                    @intFromFloat(p2.y),
+                    color,
+                );
+            }
         }
 
-        // Draw vertices
+        // Draw vertices with full rainbow (to render buffer)
         for (projected, 0..) |point, i| {
             const hue = @mod(angle * 50.0 + @as(f32, @floatFromInt(i)) * 22.5, 360.0);
             const color = hslToRgb(hue, 0.7, 0.6);
-            drawCircle(pixels, width, height, @intFromFloat(point.x), @intFromFloat(point.y), 3, color);
+            if (use_aa) {
+                drawCircleAA(render_pixels, render_width, render_height, @intFromFloat(point.x), @intFromFloat(point.y), 6, color);
+            } else {
+                drawCircleSimple(render_pixels, render_width, render_height, @intFromFloat(point.x), @intFromFloat(point.y), 4, color);
+            }
         }
+
+        // Downsample 2x to output buffer
+        downsample2x(render_pixels, render_width, render_height, pixels);
 
         // Render to terminal
         try renderer.setPixels(pixels, width, height);
