@@ -65,13 +65,15 @@ pub fn build(b: *std.Build) void {
 
     const examples = [_]Example{
         .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "phosphor", "repl", "logview" } },
-        .{ .name = "mandelbrot", .path = "examples/thermite/mandelbrot.zig", .deps = &.{"thermite"} },
-        .{ .name = "mandelbrot-v2", .path = "examples/thermite/mandelbrot_v2.zig", .deps = &.{"app"} },
-        .{ .name = "sprites", .path = "examples/thermite/sprites.zig", .deps = &.{"thermite"} },
-        .{ .name = "sprites-v2", .path = "examples/thermite/sprites_v2.zig", .deps = &.{"app"} },
-        .{ .name = "hypercube", .path = "examples/thermite/hypercube.zig", .deps = &.{"thermite"} },
-        .{ .name = "hypercube-v2", .path = "examples/thermite/hypercube_v2.zig", .deps = &.{"app"} },
+        // App architecture demos (Elm-style)
+        .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
+        .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },
+        .{ .name = "hypercube", .path = "examples/hypercube.zig", .deps = &.{"app"} },
         .{ .name = "app-demo", .path = "examples/app_demo.zig", .deps = &.{"app"} },
+        // Direct thermite API demos (low-level)
+        .{ .name = "mandelbrot-thermite", .path = "examples/thermite/mandelbrot-thermite.zig", .deps = &.{"thermite"} },
+        .{ .name = "sprites-thermite", .path = "examples/thermite/sprites-thermite.zig", .deps = &.{"thermite"} },
+        .{ .name = "hypercube-thermite", .path = "examples/thermite/hypercube-thermite.zig", .deps = &.{"thermite"} },
     };
 
     // Module lookup table
