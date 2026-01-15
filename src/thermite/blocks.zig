@@ -46,36 +46,37 @@ pub fn pixelsToBlock(pixels: [4]u32) BlockMapping {
         (pixels[3] >> 8) & 0xFFFFFF,
     };
 
-    // Count unique colors
-    var unique_colors: std.ArrayList(u32) = .{};
-    defer unique_colors.deinit(std.heap.page_allocator);
+    // Count unique colors - use stack array (max 4 colors in 2x2 block)
+    var unique_colors: [4]u32 = undefined;
+    var num_unique: usize = 0;
 
     for (colors) |color| {
         var found = false;
-        for (unique_colors.items) |uc| {
+        for (unique_colors[0..num_unique]) |uc| {
             if (uc == color) {
                 found = true;
                 break;
             }
         }
-        if (!found) {
-            unique_colors.append(std.heap.page_allocator, color) catch break;
+        if (!found and num_unique < 4) {
+            unique_colors[num_unique] = color;
+            num_unique += 1;
         }
     }
 
     // Simple case: all same color
-    if (unique_colors.items.len == 1) {
+    if (num_unique == 1) {
         return BlockMapping{
             .ch = FULL,
-            .fg = unique_colors.items[0],
-            .bg = unique_colors.items[0],
+            .fg = unique_colors[0],
+            .bg = unique_colors[0],
         };
     }
 
     // Two color case (most common)
-    if (unique_colors.items.len == 2) {
-        const color1 = unique_colors.items[0];
-        const color2 = unique_colors.items[1];
+    if (num_unique == 2) {
+        const color1 = unique_colors[0];
+        const color2 = unique_colors[1];
 
         // Count occurrences of each color
         var count1: u32 = 0;

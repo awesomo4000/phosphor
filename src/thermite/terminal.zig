@@ -8,6 +8,8 @@ pub const CLEAR_SCREEN = "\x1b[2J";
 pub const HIDE_CURSOR = "\x1b[?25l";
 pub const SHOW_CURSOR = "\x1b[?25h";
 pub const RESET_ALL = "\x1b[0m";
+pub const ENTER_ALT_SCREEN = "\x1b[?1049h";
+pub const EXIT_ALT_SCREEN = "\x1b[?1049l";
 
 pub const TerminalInfo = struct {
     fd: i32,
@@ -23,7 +25,7 @@ const termios = if (system == .windows) struct {
 var original_termios: ?termios = null;
 
 pub fn getTerminalInfo() !TerminalInfo {
-    const timer = @import("../startup_timer.zig");
+    const timer = @import("startup_timer");
     timer.mark("  getTerminalInfo: opening /dev/tty");
 
     const tty_fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
@@ -52,7 +54,7 @@ pub fn getTerminalInfo() !TerminalInfo {
 }
 
 pub fn enterRawMode(fd: i32) !void {
-    const timer = @import("../startup_timer.zig");
+    const timer = @import("startup_timer");
 
     if (system == .windows) {
         // TODO: Windows console mode
@@ -88,6 +90,10 @@ pub fn enterRawMode(fd: i32) !void {
     _ = try std.posix.tcsetattr(fd, .FLUSH, tios);
     timer.mark("  enterRawMode: tcsetattr FLUSH done");
 
+    // Enter alternate screen buffer - gives us a clean slate and
+    // tells the terminal this is a full-screen app (may improve resize behavior)
+    _ = try std.posix.write(fd, ENTER_ALT_SCREEN);
+
     // NOTE: Don't enable sync output mode here - it buffers subsequent writes
     // (hideCursor, clearScreen) until the end marker is sent. Instead, sync
     // mode is enabled/disabled per-frame in renderDifferential().
@@ -97,9 +103,12 @@ pub fn exitRawMode(fd: i32) !void {
     if (system == .windows) {
         return;
     }
-    
+
     // Disable synchronized output mode
     _ = std.posix.write(fd, "\x1b[?2026l") catch {};
+
+    // Exit alternate screen buffer - restores main screen
+    _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
 
     if (original_termios) |tios| {
         _ = try std.posix.tcsetattr(fd, .FLUSH, tios);

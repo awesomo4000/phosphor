@@ -220,7 +220,7 @@ fn readKeyAsEvent() !?Event {
     }};
     const ready = posix.poll(&pfd, 16) catch |err| {
         if (err == error.Interrupted) {
-            // SIGWINCH interrupted poll - check for resize
+            // SIGWINCH interrupted poll - check for resize immediately
             if (tui.checkResize()) |new_size| {
                 return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
             }
@@ -229,7 +229,7 @@ fn readKeyAsEvent() !?Event {
         return err;
     };
     if (ready == 0) {
-        // Check for resize again after poll timeout
+        // Check for resize after poll timeout
         if (tui.checkResize()) |new_size| {
             return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
         }
@@ -567,7 +567,8 @@ pub const ThermiteBackend = struct {
         self.renderer.back_plane = new_back;
         self.renderer.term_width = new_size.cols;
         self.renderer.term_height = new_size.rows;
-        self.renderer.first_frame = true; // Force full redraw
+        self.renderer.first_frame = true; // Clear screen
+        self.renderer.force_full_render = true; // Skip diff, render every cell
 
         // Reset cursor
         self.cursor_x = 0;

@@ -47,7 +47,7 @@ pub const Text = layout.Text;
 pub const Spacer = layout.Spacer;
 
 // Debug utilities
-pub const startup_timer = @import("startup_timer.zig");
+pub const startup_timer = @import("startup_timer");
 
 // Version info
 pub const version = "0.1.0";

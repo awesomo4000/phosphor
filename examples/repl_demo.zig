@@ -650,12 +650,22 @@ pub fn main() !void {
     }
 
     // Event loop - Thermite handles diffing, so we always render full view
+    const tui = @import("phosphor").tui;
+
     while (model.running) {
         const maybe_event = try backend.readEvent();
         if (maybe_event == null) continue;
 
+        // For resize: skip everything if more resizes are pending (coalesce)
+        // Only process the final resize to avoid redundant plane allocations
+        if (maybe_event.? == .resize and tui.resizePending()) continue;
+
         // Handle resize at the backend level (reallocate planes)
+        // Note: Ghost frames during resize are the terminal redrawing its buffer
+        // before SIGWINCH reaches us - unavoidable from our side
         if (maybe_event.? == .resize) {
+            // Clear immediately - some terminals (iTerm2) need this before resize
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\x1b[2J\x1b[H") catch {};
             const new_size = maybe_event.?.resize;
             try thermite_backend.resize(.{ .cols = new_size.cols, .rows = new_size.rows });
         }

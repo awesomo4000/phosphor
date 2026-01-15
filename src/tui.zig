@@ -61,12 +61,17 @@ pub fn installResizeHandler() void {
             var act: posix.Sigaction = .{
                 .handler = .{ .handler = handleSigwinch },
                 .mask = posix.sigemptyset(),
-                .flags = 0, // Don't restart syscalls - let SIGWINCH interrupt poll()
+                .flags = 0, // Don't restart - let SIGWINCH interrupt poll()
             };
             _ = posix.sigaction(posix.SIG.WINCH, &act, null);
         },
         else => {}, // Windows doesn't have SIGWINCH
     }
+}
+
+/// Check if a resize is pending (without consuming it)
+pub fn resizePending() bool {
+    return resize_pending;
 }
 
 // Check if resize occurred, returns new size if so

@@ -4,12 +4,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Startup timer module (debug timing utility)
+    const startup_timer = b.addModule("startup_timer", .{
+        .root_source_file = b.path("src/startup_timer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Thermite module (low-level pixel rendering)
     const thermite = b.addModule("thermite", .{
         .root_source_file = b.path("src/thermite/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    thermite.addImport("startup_timer", startup_timer);
 
     // Phosphor module (high-level TUI framework)
     const phosphor = b.addModule("phosphor", .{
@@ -18,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     phosphor.addImport("thermite", thermite);
+    phosphor.addImport("startup_timer", startup_timer);
 
     // Repl module (readline-style input widget) - depends on phosphor for render_commands
     const repl = b.addModule("repl", .{
@@ -35,7 +44,62 @@ pub fn build(b: *std.Build) void {
     });
     logview.addImport("phosphor", phosphor);
 
+    // ============================================
+    // Examples
+    // ============================================
+    const examples_step = b.step("examples", "Build all examples");
+
+    const Example = struct {
+        name: []const u8,
+        path: []const u8,
+        deps: []const []const u8,
+    };
+
+    const examples = [_]Example{
+        .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "phosphor", "repl", "logview" } },
+        .{ .name = "mandelbrot", .path = "examples/thermite/mandelbrot.zig", .deps = &.{"thermite"} },
+        .{ .name = "sprite-demo", .path = "examples/thermite/sprite_demo.zig", .deps = &.{"thermite"} },
+    };
+
+    // Module lookup table
+    const modules = .{
+        .{ "phosphor", phosphor },
+        .{ "thermite", thermite },
+        .{ "repl", repl },
+        .{ "logview", logview },
+    };
+
+    inline for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(example.path),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+
+        // Add dependencies
+        inline for (example.deps) |dep_name| {
+            inline for (modules) |mod| {
+                if (std.mem.eql(u8, mod[0], dep_name)) {
+                    exe.root_module.addImport(dep_name, mod[1]);
+                }
+            }
+        }
+
+        const install = b.addInstallArtifact(exe, .{});
+        examples_step.dependOn(&install.step);
+
+        // Create run step
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(b.getInstallStep());
+        b.step(b.fmt("run-{s}", .{example.name}), b.fmt("Run {s}", .{example.name})).dependOn(&run.step);
+    }
+
+    // ============================================
     // Tests
+    // ============================================
     const test_step = b.step("test", "Run all tests");
 
     // Terminal state tests (PTY-based, signal handling)

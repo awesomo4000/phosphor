@@ -19,9 +19,11 @@ pub const Renderer = struct {
     output_buffer: std.ArrayList(u8),
     /// First frame flag to force full render
     first_frame: bool = true,
+    /// Skip differential comparison - render every cell (set during resize)
+    force_full_render: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*Renderer {
-        const timer = @import("../startup_timer.zig");
+        const timer = @import("startup_timer");
         timer.mark("Renderer.init() entry");
 
         const renderer = try allocator.create(Renderer);
@@ -199,11 +201,12 @@ pub const Renderer = struct {
                 const old_cell = self.front_plane.getCell(@intCast(x), @intCast(y));
                 const new_cell = self.back_plane.getCell(@intCast(x), @intCast(y));
 
-                // Skip unchanged cells (unless first frame)
-                // On first frame, still skip default/empty cells for faster startup
-                if (old_cell != null and new_cell != null and old_cell.?.eql(new_cell.?.*)) {
-                    cursor_moved = false;
-                    continue;
+                // Skip unchanged cells (unless forcing full render)
+                if (!self.force_full_render) {
+                    if (old_cell != null and new_cell != null and old_cell.?.eql(new_cell.?.*)) {
+                        cursor_moved = false;
+                        continue;
+                    }
                 }
 
                 // Skip blank cells on first frame (nothing to draw)
@@ -266,6 +269,9 @@ pub const Renderer = struct {
 
         // Copy back buffer to front buffer
         self.front_plane.copyFrom(self.back_plane);
+
+        // Reset force_full_render after use
+        self.force_full_render = false;
     }
 
     /// Sync with terminal - blocks until terminal has actually rendered.
