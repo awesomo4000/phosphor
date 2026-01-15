@@ -58,7 +58,8 @@ pub fn build(b: *std.Build) void {
     const examples = [_]Example{
         .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "phosphor", "repl", "logview" } },
         .{ .name = "mandelbrot", .path = "examples/thermite/mandelbrot.zig", .deps = &.{"thermite"} },
-        .{ .name = "sprite-demo", .path = "examples/thermite/sprite_demo.zig", .deps = &.{"thermite"} },
+        .{ .name = "sprites", .path = "examples/thermite/sprites.zig", .deps = &.{"thermite"} },
+        .{ .name = "hypercube", .path = "examples/thermite/hypercube.zig", .deps = &.{"thermite"} },
     };
 
     // Module lookup table
