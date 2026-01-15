@@ -1,5 +1,17 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const thermite = @import("thermite");
+
+/// Backend selection for rendering
+pub const Backend = enum {
+    simple,
+    thermite,
+};
+
+/// Options for App.run()
+pub const RunOptions = struct {
+    backend: Backend = .simple,
+};
 
 /// Subscriptions - what events the app wants
 pub const Subs = struct {
@@ -249,8 +261,8 @@ pub fn App(comptime Module: type) type {
     const Msg = update_params[1].type.?;
 
     return struct {
-        /// Simple run - model created/destroyed internally
-        pub fn run(allocator: Allocator) !void {
+        /// Run the app with options
+        pub fn run(allocator: Allocator, options: RunOptions) !void {
             var model = if (init_takes_allocator)
                 Module.init(allocator)
             else
@@ -267,11 +279,14 @@ pub fn App(comptime Module: type) type {
                 }
             };
 
-            return runWithModel(allocator, &model);
+            return switch (options.backend) {
+                .simple => runSimple(allocator, &model),
+                .thermite => runThermite(allocator, &model),
+            };
         }
 
-        /// Advanced run - caller owns model
-        pub fn runWithModel(allocator: Allocator, model: *Model) !void {
+        /// Run with simple backend (half-block rendering)
+        fn runSimple(allocator: Allocator, model: *Model) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
@@ -371,6 +386,141 @@ pub fn App(comptime Module: type) type {
                     }
                 }
             }
+        }
+
+        /// Run with thermite backend (optimized 2x2 block rendering)
+        fn runThermite(allocator: Allocator, model: *Model) !void {
+            // Frame arena for view nodes
+            var frame_arena = std.heap.ArenaAllocator.init(allocator);
+            defer frame_arena.deinit();
+
+            // Initialize thermite renderer
+            const renderer = try thermite.TerminalPixels.init(allocator);
+            defer renderer.deinit();
+
+            // Install signal handlers (SIGINT cleanup + SIGWINCH resize)
+            thermite.terminal.installSignalHandlers(renderer.getTerminalFd());
+
+            // Get initial pixel resolution
+            const max_res = renderer.maxResolution();
+            var pixel_width = max_res.width;
+            var pixel_height = max_res.height;
+
+            // UI builder using frame arena
+            var ui = Ui{ .ally = frame_arena.allocator() };
+
+            // Timing
+            var last_frame = std.time.milliTimestamp();
+
+            // Send initial resize (pixel dimensions)
+            if (executeCmd(Module.update(model, msgFromResize(Msg, pixel_width, pixel_height), allocator))) return;
+
+            // Build initial view
+            var root = Module.view(model, &ui);
+
+            const term_fd = renderer.getTerminalFd();
+
+            // Event loop
+            while (true) {
+                const subs = Module.subs(model);
+
+                // Input handling
+                if (subs.animation_frame) {
+                    // Non-blocking key check when animating
+                    if (thermite.terminal.readKey(term_fd)) |key| {
+                        if (findKeyHandler(root)) |handler| {
+                            const typed_handler: *const fn (u8) Msg = @ptrCast(@alignCast(handler));
+                            if (executeCmd(Module.update(model, typed_handler(key), allocator))) return;
+                        } else if (@hasField(Msg, "key")) {
+                            if (executeCmd(Module.update(model, @unionInit(Msg, "key", key), allocator))) return;
+                        }
+                    }
+                } else {
+                    // Blocking poll when not animating
+                    switch (thermite.terminal.pollInput(term_fd, 100) catch .timeout) {
+                        .ready => {
+                            if (thermite.terminal.readKey(term_fd)) |key| {
+                                if (findKeyHandler(root)) |handler| {
+                                    const typed_handler: *const fn (u8) Msg = @ptrCast(@alignCast(handler));
+                                    if (executeCmd(Module.update(model, typed_handler(key), allocator))) return;
+                                } else if (@hasField(Msg, "key")) {
+                                    if (executeCmd(Module.update(model, @unionInit(Msg, "key", key), allocator))) return;
+                                }
+                            }
+                        },
+                        .resize, .timeout => {},
+                    }
+                }
+
+                // Check for terminal resize
+                if (renderer.checkResize()) |new_res| {
+                    pixel_width = new_res.width;
+                    pixel_height = new_res.height;
+                    if (@hasField(Msg, "resize")) {
+                        const msg = @unionInit(Msg, "resize", Size{ .w = pixel_width, .h = pixel_height });
+                        if (executeCmd(Module.update(model, msg, allocator))) return;
+                    }
+                }
+
+                // Update timing
+                const now = std.time.milliTimestamp();
+                const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
+                last_frame = now;
+
+                // Send tick if animating
+                if (subs.animation_frame) {
+                    if (msgFromTick(Msg, dt)) |msg| {
+                        if (executeCmd(Module.update(model, msg, allocator))) return;
+                    }
+                }
+
+                // Reset frame arena, rebuild view
+                _ = frame_arena.reset(.retain_capacity);
+                ui.ally = frame_arena.allocator();
+
+                root = Module.view(model, &ui);
+
+                // Render: find canvas in view tree and send to thermite
+                if (findCanvasRef(root)) |ref| {
+                    // Call render function
+                    if (ref.render_fn) |render_fn| {
+                        render_fn(ref.render_ctx);
+                    }
+                    // Send pixels to thermite
+                    try renderer.setPixels(ref.pixels.*, ref.width.*, ref.height.*);
+                    try renderer.presentOptimized();
+                }
+
+                // Frame pacing
+                if (subs.animation_frame) {
+                    const frame_time = std.time.milliTimestamp() - now;
+                    const target: i64 = 16;
+                    if (frame_time < target) {
+                        std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                    }
+                }
+            }
+        }
+
+        /// Find first canvas in view tree
+        fn findCanvasRef(node: *Node) ?Node.CanvasRef {
+            switch (node.data) {
+                .canvas => |ref| return ref,
+                .column => |children| {
+                    for (children) |child| {
+                        if (findCanvasRef(child)) |ref| return ref;
+                    }
+                },
+                .row => |children| {
+                    for (children) |child| {
+                        if (findCanvasRef(child)) |ref| return ref;
+                    }
+                },
+                .flex => |f| return findCanvasRef(f.child),
+                .fixed => |f| return findCanvasRef(f.child),
+                else => {},
+            }
+            return null;
         }
 
         /// Find first on_key handler in view tree (depth-first)
