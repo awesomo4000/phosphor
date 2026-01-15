@@ -49,6 +49,15 @@ pub const Plane = struct {
         self.cursor_x = 0;
     }
 
+    /// Clear plane with explicit background color (for terminals that don't support transparent)
+    pub fn clearWithBg(self: *Plane, bg_color: u32) void {
+        for (self.cells) |*cell| {
+            cell.* = .{ .ch = ' ', .fg = 0xFFFFFF, .bg = bg_color };
+        }
+        self.cursor_y = 0;
+        self.cursor_x = 0;
+    }
+
     pub fn getCell(self: *const Plane, x: u32, y: u32) ?*const Cell {
         if (x >= self.width or y >= self.height) return null;
         return &self.cells[y * self.width + x];

@@ -19,6 +19,10 @@ pub const blocks = @import("blocks.zig");
 pub const terminal = @import("terminal.zig");
 pub const Sprite = @import("sprite.zig").Sprite;
 
+// Terminal capabilities detection
+pub const capabilities = @import("capabilities.zig");
+pub const Capabilities = capabilities.Capabilities;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("mock_terminal.zig");

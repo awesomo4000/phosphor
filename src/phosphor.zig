@@ -46,6 +46,12 @@ pub const renderTree = layout.renderTree;
 pub const Text = layout.Text;
 pub const Spacer = layout.Spacer;
 
+// Terminal capabilities detection (re-exported from thermite)
+const thermite_mod = @import("thermite");
+pub const capabilities = thermite_mod.capabilities;
+pub const Capabilities = thermite_mod.Capabilities;
+pub const detectCapabilities = capabilities.detectFromEnv;
+
 // Debug utilities
 pub const startup_timer = @import("startup_timer");
 

@@ -6,6 +6,8 @@ const Cell = cell_mod.Cell;
 const DEFAULT_COLOR = cell_mod.DEFAULT_COLOR;
 const terminal = @import("terminal.zig");
 const FastRenderer = @import("fast_renderer.zig").FastRenderer;
+const capabilities = @import("capabilities.zig");
+const Capabilities = capabilities.Capabilities;
 
 /// Double-buffered terminal renderer
 pub const Renderer = struct {
@@ -21,6 +23,8 @@ pub const Renderer = struct {
     first_frame: bool = true,
     /// Skip differential comparison - render every cell (set during resize)
     force_full_render: bool = false,
+    /// Detected terminal capabilities
+    caps: Capabilities = .{},
 
     pub fn init(allocator: std.mem.Allocator) !*Renderer {
         const timer = @import("startup_timer");
@@ -43,6 +47,10 @@ pub const Renderer = struct {
         errdefer back.deinit();
         timer.mark("back Plane.init() done");
 
+        // Detect terminal capabilities
+        const caps = capabilities.detectFromEnv();
+        timer.mark("capabilities detected");
+
         renderer.* = .{
             .front_plane = front,
             .back_plane = back,
@@ -51,6 +59,7 @@ pub const Renderer = struct {
             .term_height = tinfo.height,
             .allocator = allocator,
             .output_buffer = std.ArrayList(u8){},
+            .caps = caps,
         };
 
         // Initialize terminal
@@ -63,9 +72,17 @@ pub const Renderer = struct {
         try terminal.clearScreen(renderer.ttyfd);
         timer.mark("clearScreen() done");
 
-        // Initialize front buffer to match cleared screen
-        front.clear();
-        back.clear();
+        // Initialize buffers - use explicit black for terminals that don't handle transparent
+        if (caps.terminal == .apple_terminal or
+            caps.terminal == .linux_console or
+            caps.terminal == .unknown)
+        {
+            front.clearWithBg(0x000000);
+            back.clearWithBg(0x000000);
+        } else {
+            front.clear();
+            back.clear();
+        }
         timer.mark("buffers cleared");
 
         return renderer;
@@ -96,12 +113,63 @@ pub const Renderer = struct {
     }
 
     /// Clear the back buffer
+    /// For terminals that don't support transparent backgrounds (like Terminal.app),
+    /// this clears to explicit black instead of DEFAULT_COLOR
     pub fn clearBackBuffer(self: *Renderer) void {
-        self.back_plane.clear();
+        // Terminal.app and some others don't handle transparent backgrounds well
+        // Use explicit black for these terminals
+        if (self.caps.terminal == .apple_terminal or
+            self.caps.terminal == .linux_console or
+            self.caps.terminal == .unknown)
+        {
+            self.back_plane.clearWithBg(0x000000); // Explicit black
+        } else {
+            self.back_plane.clear();
+        }
     }
 
     /// Alias for clearBackBuffer (backwards compatibility with TerminalPixels API)
     pub const clear = clearBackBuffer;
+
+    /// Write foreground color escape sequence based on terminal capabilities
+    fn writeFgColor(self: *Renderer, writer: anytype, color: u32) !void {
+        const r: u8 = @intCast((color >> 16) & 0xFF);
+        const g: u8 = @intCast((color >> 8) & 0xFF);
+        const b: u8 = @intCast(color & 0xFF);
+
+        switch (self.caps.color) {
+            .truecolor => try writer.print("\x1b[38;2;{};{};{}m", .{ r, g, b }),
+            .@"256" => {
+                const idx = capabilities.rgbTo256(r, g, b);
+                try writer.print("\x1b[38;5;{}m", .{idx});
+            },
+            .basic => {
+                const idx = capabilities.rgbToBasic(r, g, b);
+                try writer.print("\x1b[{}m", .{30 + idx});
+            },
+            .none => {},
+        }
+    }
+
+    /// Write background color escape sequence based on terminal capabilities
+    fn writeBgColor(self: *Renderer, writer: anytype, color: u32) !void {
+        const r: u8 = @intCast((color >> 16) & 0xFF);
+        const g: u8 = @intCast((color >> 8) & 0xFF);
+        const b: u8 = @intCast(color & 0xFF);
+
+        switch (self.caps.color) {
+            .truecolor => try writer.print("\x1b[48;2;{};{};{}m", .{ r, g, b }),
+            .@"256" => {
+                const idx = capabilities.rgbTo256(r, g, b);
+                try writer.print("\x1b[48;5;{}m", .{idx});
+            },
+            .basic => {
+                const idx = capabilities.rgbToBasic(r, g, b);
+                try writer.print("\x1b[{}m", .{40 + idx});
+            },
+            .none => {},
+        }
+    }
 
     /// Render the back buffer to the terminal
     pub fn render(self: *Renderer) !void {
@@ -140,19 +208,13 @@ pub const Renderer = struct {
                 if (new_cell) |cell| {
                     // Update foreground color if changed
                     if (current_fg == null or current_fg.? != cell.fg) {
-                        const r = (cell.fg >> 16) & 0xFF;
-                        const g = (cell.fg >> 8) & 0xFF;
-                        const b = cell.fg & 0xFF;
-                        try writer.print("\x1b[38;2;{};{};{}m", .{ r, g, b });
+                        try self.writeFgColor(writer, cell.fg);
                         current_fg = cell.fg;
                     }
 
                     // Update background color if changed
                     if (current_bg == null or current_bg.? != cell.bg) {
-                        const r = (cell.bg >> 16) & 0xFF;
-                        const g = (cell.bg >> 8) & 0xFF;
-                        const b = cell.bg & 0xFF;
-                        try writer.print("\x1b[48;2;{};{};{}m", .{ r, g, b });
+                        try self.writeBgColor(writer, cell.bg);
                         current_bg = cell.bg;
                     }
 
@@ -184,14 +246,33 @@ pub const Renderer = struct {
         self.output_buffer.clearRetainingCapacity();
         const writer = self.output_buffer.writer(self.allocator);
 
-        // Begin synchronized output mode (reduces flicker)
-        try writer.writeAll("\x1b[?2026h");
+        // Begin synchronized output mode (reduces flicker) - only if supported
+        if (self.caps.synchronized_output) {
+            try writer.writeAll("\x1b[?2026h");
+        }
 
         // Force full render on first frame
         const force_full = self.first_frame;
         if (self.first_frame) {
-            try writer.writeAll(terminal.CLEAR_SCREEN);
-            try writer.writeAll(terminal.CURSOR_HOME);
+            // For terminals that don't handle alt screen well, fill entire screen with black
+            if (self.caps.terminal == .apple_terminal or
+                self.caps.terminal == .linux_console or
+                self.caps.terminal == .unknown)
+            {
+                // Set black background, then fill screen with spaces
+                try writer.writeAll("\x1b[0m\x1b[40m"); // Reset + black bg
+                try writer.writeAll(terminal.CURSOR_HOME);
+                // Fill every cell with space (black bg)
+                for (0..self.term_height) |_| {
+                    for (0..self.term_width) |_| {
+                        try writer.writeByte(' ');
+                    }
+                }
+                try writer.writeAll(terminal.CURSOR_HOME);
+            } else {
+                try writer.writeAll(terminal.CLEAR_SCREEN);
+                try writer.writeAll(terminal.CURSOR_HOME);
+            }
             self.first_frame = false;
         }
 
@@ -205,17 +286,25 @@ pub const Renderer = struct {
                 const new_cell = self.back_plane.getCell(@intCast(x), @intCast(y));
 
                 // Skip unchanged cells (unless forcing full render)
-                if (!self.force_full_render) {
+                // On first frame (force_full), render everything to clear screen garbage
+                if (!self.force_full_render and !force_full) {
                     if (old_cell != null and new_cell != null and old_cell.?.eql(new_cell.?.*)) {
                         cursor_moved = false;
                         continue;
                     }
                 }
 
-                // Skip blank cells on first frame (nothing to draw)
+                // Skip blank cells on first frame ONLY for terminals with proper alt screen
+                // For Terminal.app and others, we need to render every cell explicitly
                 if (force_full and new_cell != null and new_cell.?.isDefault()) {
-                    cursor_moved = false;
-                    continue;
+                    // Only skip default cells if terminal properly supports transparent bg
+                    if (self.caps.terminal != .apple_terminal and
+                        self.caps.terminal != .linux_console and
+                        self.caps.terminal != .unknown)
+                    {
+                        cursor_moved = false;
+                        continue;
+                    }
                 }
 
                 if (new_cell) |cell| {
@@ -230,10 +319,7 @@ pub const Renderer = struct {
                         if (cell.fg == DEFAULT_COLOR) {
                             try writer.writeAll("\x1b[39m"); // Default fg
                         } else {
-                            const r = (cell.fg >> 16) & 0xFF;
-                            const g = (cell.fg >> 8) & 0xFF;
-                            const b = cell.fg & 0xFF;
-                            try writer.print("\x1b[38;2;{};{};{}m", .{ r, g, b });
+                            try self.writeFgColor(writer, cell.fg);
                         }
                         current_fg = cell.fg;
                     }
@@ -242,10 +328,7 @@ pub const Renderer = struct {
                         if (cell.bg == DEFAULT_COLOR) {
                             try writer.writeAll("\x1b[49m"); // Default bg (transparent)
                         } else {
-                            const r = (cell.bg >> 16) & 0xFF;
-                            const g = (cell.bg >> 8) & 0xFF;
-                            const b = cell.bg & 0xFF;
-                            try writer.print("\x1b[48;2;{};{};{}m", .{ r, g, b });
+                            try self.writeBgColor(writer, cell.bg);
                         }
                         current_bg = cell.bg;
                     }
@@ -263,7 +346,9 @@ pub const Renderer = struct {
         }
 
         // End synchronized output mode (tells terminal to display the frame)
-        try writer.writeAll("\x1b[?2026l");
+        if (self.caps.synchronized_output) {
+            try writer.writeAll("\x1b[?2026l");
+        }
 
         // Write to terminal
         if (self.output_buffer.items.len > 0) {
@@ -395,9 +480,17 @@ pub const Renderer = struct {
         self.term_width = new_width;
         self.term_height = new_height;
 
-        // Clear both planes
-        new_front.clear();
-        new_back.clear();
+        // Clear both planes - use explicit black for terminals that don't handle transparent
+        if (self.caps.terminal == .apple_terminal or
+            self.caps.terminal == .linux_console or
+            self.caps.terminal == .unknown)
+        {
+            new_front.clearWithBg(0x000000);
+            new_back.clearWithBg(0x000000);
+        } else {
+            new_front.clear();
+            new_back.clear();
+        }
 
         // Force full render on next frame
         self.first_frame = true;

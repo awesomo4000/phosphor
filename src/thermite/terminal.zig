@@ -123,6 +123,14 @@ pub fn clearScreen(fd: i32) !void {
     _ = try std.posix.write(fd, CLEAR_SCREEN ++ CURSOR_HOME);
 }
 
+/// Clear screen with an explicit background color (for terminals that don't handle transparent well)
+pub fn clearScreenWithBg(fd: i32, r: u8, g: u8, b: u8) !void {
+    var buf: [64]u8 = undefined;
+    // Set background color, clear screen, reset to default
+    const seq = try std.fmt.bufPrint(&buf, "\x1b[48;2;{};{};{}m" ++ CLEAR_SCREEN ++ CURSOR_HOME ++ RESET_ALL, .{ r, g, b });
+    _ = try std.posix.write(fd, seq);
+}
+
 /// Sync with the terminal - blocks until terminal has processed all prior output.
 /// Uses a cursor position query (DSR) as a round-trip barrier.
 /// Useful for measuring actual display latency vs write latency.

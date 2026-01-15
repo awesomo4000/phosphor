@@ -74,6 +74,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mandelbrot-thermite", .path = "examples/thermite/mandelbrot-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "sprites-thermite", .path = "examples/thermite/sprites-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "hypercube-thermite", .path = "examples/thermite/hypercube-thermite.zig", .deps = &.{"thermite"} },
+        // Diagnostic tools
+        .{ .name = "caps-check", .path = "src/thermite/caps_check.zig", .deps = &.{} },
     };
 
     // Module lookup table
