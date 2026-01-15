@@ -11,6 +11,8 @@ pub const Backend = enum {
 /// Options for App.run()
 pub const RunOptions = struct {
     backend: Backend = .simple,
+    /// Target frames per second. 0 = unlimited (just yields between frames)
+    target_fps: u32 = 120,
 };
 
 /// Subscriptions - what events the app wants
@@ -156,6 +158,7 @@ pub const Node = struct {
         height: *u32,
         render_fn: ?*const fn (*anyopaque) void,
         render_ctx: *anyopaque,
+        overlay_text: ?[]const u8 = null,
     };
 
     pub const Flex = struct {
@@ -177,6 +180,7 @@ pub fn CanvasOptions(comptime Ctx: type, comptime Msg: type) type {
         on_key: ?*const fn (u8) Msg = null,
         on_click: ?*const fn () Msg = null,
         on_mouse: ?*const fn (u16, u16) Msg = null, // x, y
+        overlay_text: ?[]const u8 = null, // status bar text drawn at bottom
     };
 }
 
@@ -212,6 +216,7 @@ pub const Ui = struct {
                 .height = &opts.buffer.height,
                 .render_fn = if (opts.buffer.render_fn) |f| @ptrCast(f) else null,
                 .render_ctx = opts.ctx,
+                .overlay_text = opts.overlay_text,
             } },
             .on_key = if (opts.on_key) |h| @ptrCast(h) else null,
             .on_click = if (opts.on_click) |h| @ptrCast(h) else null,
@@ -280,13 +285,13 @@ pub fn App(comptime Module: type) type {
             };
 
             return switch (options.backend) {
-                .simple => runSimple(allocator, &model),
-                .thermite => runThermite(allocator, &model),
+                .simple => runSimple(allocator, &model, options),
+                .thermite => runThermite(allocator, &model, options),
             };
         }
 
         /// Run with simple backend (half-block rendering)
-        fn runSimple(allocator: Allocator, model: *Model) !void {
+        fn runSimple(allocator: Allocator, model: *Model, options: RunOptions) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
@@ -380,7 +385,7 @@ pub fn App(comptime Module: type) type {
                 // Frame pacing
                 if (subs.animation_frame) {
                     const frame_time = std.time.milliTimestamp() - last_frame;
-                    const target: i64 = 16; // ~60fps
+                    const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
                         std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
                     }
@@ -389,7 +394,7 @@ pub fn App(comptime Module: type) type {
         }
 
         /// Run with thermite backend (optimized 2x2 block rendering)
-        fn runThermite(allocator: Allocator, model: *Model) !void {
+        fn runThermite(allocator: Allocator, model: *Model, options: RunOptions) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
@@ -489,12 +494,17 @@ pub fn App(comptime Module: type) type {
                     // Send pixels to thermite
                     try renderer.setPixels(ref.pixels.*, ref.width.*, ref.height.*);
                     try renderer.presentOptimized();
+
+                    // Draw overlay text (status bar) if present
+                    if (ref.overlay_text) |text| {
+                        drawOverlayText(renderer.ttyfd, renderer.term_width, renderer.term_height, text);
+                    }
                 }
 
                 // Frame pacing
                 if (subs.animation_frame) {
                     const frame_time = std.time.milliTimestamp() - now;
-                    const target: i64 = 16;
+                    const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
                         std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
                     }
@@ -574,6 +584,31 @@ pub fn App(comptime Module: type) type {
                     return false;
                 },
             }
+        }
+
+        /// Draw overlay text at bottom of terminal (status bar)
+        fn drawOverlayText(fd: i32, term_width: u32, term_height: u32, text: []const u8) void {
+            if (term_width < 10 or term_height < 3) return;
+
+            var buf: [32]u8 = undefined;
+            // Move to bottom row, white on black
+            const prefix = std.fmt.bufPrint(&buf, "\x1b[{};1H\x1b[97;40m", .{term_height}) catch return;
+            _ = std.posix.write(fd, prefix) catch {};
+
+            // Write text (truncated to terminal width)
+            const write_len = @min(text.len, term_width);
+            _ = std.posix.write(fd, text[0..write_len]) catch {};
+
+            // Fill rest of line with spaces
+            if (term_width > write_len) {
+                var spaces: [256]u8 = undefined;
+                const fill_len = @min(term_width - write_len, 256);
+                @memset(spaces[0..fill_len], ' ');
+                _ = std.posix.write(fd, spaces[0..fill_len]) catch {};
+            }
+
+            // Reset colors
+            _ = std.posix.write(fd, "\x1b[0m") catch {};
         }
 
         fn renderToScreen(screen: *ScreenBuffer, root: *Node, width: u32, height: u32) void {

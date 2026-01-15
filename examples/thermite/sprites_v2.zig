@@ -31,8 +31,19 @@ pub const Model = struct {
     fps_frame_count: u32 = 0,
     fps_last_time: i64 = 0,
 
+    // Status bar buffer
+    status_buf: [128]u8 = undefined,
+    status_len: usize = 0,
+
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         self.canvas.deinit(allocator);
+    }
+
+    pub fn getStatusText(self: *Model) []const u8 {
+        self.status_len = (std.fmt.bufPrint(&self.status_buf, " Sprite Demo | FPS:{d:>3} | Frame:{d:>6} | [Q]=quit ", .{
+            self.fps, self.frame,
+        }) catch &self.status_buf).len;
+        return self.status_buf[0..self.status_len];
     }
 };
 
@@ -227,6 +238,7 @@ pub fn view(model: *Model, ui: *app.Ui) *app.Node {
         .buffer = &model.canvas,
         .ctx = model,
         .on_key = onKey,
+        .overlay_text = model.getStatusText(),
     });
 }
 
@@ -245,5 +257,5 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    try app.App(@This()).run(gpa.allocator(), .{ .backend = .thermite });
+    try app.App(@This()).run(gpa.allocator(), .{ .backend = .thermite, .target_fps = 0 });
 }
