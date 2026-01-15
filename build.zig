@@ -69,7 +69,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },
         .{ .name = "hypercube", .path = "examples/hypercube.zig", .deps = &.{"app"} },
-        .{ .name = "app-demo", .path = "examples/app_demo.zig", .deps = &.{"app"} },
         // Direct thermite API demos (low-level)
         .{ .name = "mandelbrot-thermite", .path = "examples/thermite/mandelbrot-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "sprites-thermite", .path = "examples/thermite/sprites-thermite.zig", .deps = &.{"thermite"} },
