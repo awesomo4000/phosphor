@@ -1,116 +1,132 @@
 const std = @import("std");
-const phosphor = @import("phosphor");
-const Application = phosphor.Application;
-const Sub = phosphor.Sub;
-const Key = phosphor.Key;
-const Size = phosphor.Size;
-const LayoutNode = phosphor.LayoutNode;
+const app = @import("app");
 
-// ─────────────────────────────────────────────────────────────
-// Model
-// ─────────────────────────────────────────────────────────────
+// ============================================
+// Model - owns widget state (including canvas)
+// ============================================
 
-const Model = struct {
-    count: i32,
-    size: Size,
-    last_key: ?Key,
+pub const Model = struct {
+    canvas: app.Canvas(Model) = .{ .render_fn = render },
+    box_x: f32 = 10,
+    box_y: f32 = 10,
+    vel_x: f32 = 60,
+    vel_y: f32 = 40,
+    is_paused: bool = false,
+
+    pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
+        self.canvas.deinit(allocator);
+    }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Msg
-// ─────────────────────────────────────────────────────────────
+// ============================================
+// Messages
+// ============================================
 
-const Msg = union(enum) {
-    key: Key,
-    resize: Size,
+pub const Msg = union(enum) {
+    tick: f32,
+    canvas_key: u8, // from onKey handler
+    resize: app.Size,
 };
 
-// ─────────────────────────────────────────────────────────────
-// Init
-// ─────────────────────────────────────────────────────────────
+// ============================================
+// App functions
+// ============================================
 
-fn init(_: std.mem.Allocator, size: Size) !Model {
-    return .{
-        .count = 0,
-        .size = size,
-        .last_key = null,
-    };
+pub fn init() Model {
+    return .{};
 }
 
-// ─────────────────────────────────────────────────────────────
-// Update
-// ─────────────────────────────────────────────────────────────
-
-const Cmd = Application(Model, Msg).Cmd;
-
-fn update(model: *Model, msg: Msg) !Cmd {
+pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
     switch (msg) {
-        .key => |key| {
-            model.last_key = key;
-            switch (key) {
-                .char => |c| {
-                    if (c == 'q') return .quit;
-                    if (c == '+' or c == '=') model.count += 1;
-                    if (c == '-' or c == '_') model.count -= 1;
-                },
-                .ctrl_c, .ctrl_d => return .quit,
-                .up => model.count += 1,
-                .down => model.count -= 1,
-                else => {},
+        .tick => |dt| {
+            if (model.is_paused) return .none;
+            if (model.canvas.width < 30 or model.canvas.height < 30) return .none;
+
+            // Update position
+            model.box_x += model.vel_x * dt;
+            model.box_y += model.vel_y * dt;
+
+            // Bounce off walls
+            const max_x = @as(f32, @floatFromInt(model.canvas.width - 20));
+            const max_y = @as(f32, @floatFromInt(model.canvas.height - 20));
+
+            if (model.box_x <= 0 or model.box_x >= max_x) {
+                model.vel_x = -model.vel_x;
+                model.box_x = std.math.clamp(model.box_x, 0, max_x);
+            }
+            if (model.box_y <= 0 or model.box_y >= max_y) {
+                model.vel_y = -model.vel_y;
+                model.box_y = std.math.clamp(model.box_y, 0, max_y);
             }
         },
+        // Key events come through onKey handler
+        .canvas_key => |k| switch (k) {
+            'q', 3 => return .quit,
+            ' ' => model.is_paused = !model.is_paused,
+            else => {},
+        },
         .resize => |size| {
-            model.size = size;
+            // Resize canvas directly using runtime's allocator
+            model.canvas.resize(allocator, size.w, size.h * 2) catch {};
         },
     }
     return .none;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Subscriptions
-// ─────────────────────────────────────────────────────────────
-
-fn subscriptions(_: *const Model) []const Sub {
-    return &.{ .keyboard, .resize };
+/// Named key handler - converts raw key to Msg
+fn onCanvasKey(key: u8) Msg {
+    return .{ .canvas_key = key };
 }
 
-// ─────────────────────────────────────────────────────────────
-// View
-// ─────────────────────────────────────────────────────────────
+/// Render function - draws to canvas (called from view tree)
+fn render(model: *Model) void {
+    if (model.canvas.width == 0 or model.canvas.height == 0) return;
 
-fn view(model: *const Model, allocator: std.mem.Allocator) !LayoutNode {
-    // Build strings
-    const count_text = try std.fmt.allocPrint(allocator, "Count: {d}", .{model.count});
-    const size_text = try std.fmt.allocPrint(allocator, "Size: {d}x{d}", .{ model.size.cols, model.size.rows });
-    const key_text = if (model.last_key) |k|
-        try std.fmt.allocPrint(allocator, "Last key: {any}", .{k})
-    else
-        "Last key: (none)";
+    // Clear with dark blue
+    model.canvas.clear(0x102040FF);
 
-    // Build layout
-    const children = try allocator.alloc(LayoutNode, 5);
-    children[0] = LayoutNode.text("Application Demo - press q to quit");
-    children[1] = LayoutNode.text("");
-    children[2] = LayoutNode.text(count_text);
-    children[3] = LayoutNode.text(size_text);
-    children[4] = LayoutNode.text(key_text);
+    // Draw bouncing box
+    const x: i32 = @intFromFloat(model.box_x);
+    const y: i32 = @intFromFloat(model.box_y);
+    model.canvas.drawRect(x, y, 20, 20, 0xFF8000FF); // Orange box
 
-    return LayoutNode.vbox(children);
+    // Draw border
+    const w = model.canvas.width;
+    const h = model.canvas.height;
+    var i: u32 = 0;
+    while (i < w) : (i += 1) {
+        model.canvas.setPixel(@intCast(i), 0, 0xFFFFFFFF);
+        model.canvas.setPixel(@intCast(i), @intCast(h - 1), 0xFFFFFFFF);
+    }
+    i = 0;
+    while (i < h) : (i += 1) {
+        model.canvas.setPixel(0, @intCast(i), 0xFFFFFFFF);
+        model.canvas.setPixel(@intCast(w - 1), @intCast(i), 0xFFFFFFFF);
+    }
 }
 
-// ─────────────────────────────────────────────────────────────
-// App definition
-// ─────────────────────────────────────────────────────────────
+pub fn view(model: *Model, ui: *app.Ui) *app.Node {
+    return ui.canvas(Model, Msg, .{
+        .buffer = &model.canvas,
+        .ctx = model,
+        .on_key = onCanvasKey,
+    });
+}
 
-const MyApp = Application(Model, Msg){
-    .init = init,
-    .update = update,
-    .view = view,
-    .subscriptions = subscriptions,
-};
+pub fn subs(model: *Model) app.Subs {
+    return .{
+        .keyboard = true,
+        .animation_frame = !model.is_paused,
+    };
+}
+
+// ============================================
+// Main
+// ============================================
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try MyApp.run(gpa.allocator());
+
+    try app.App(@This()).run(gpa.allocator());
 }
