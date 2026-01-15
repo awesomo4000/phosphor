@@ -212,13 +212,22 @@ fn readKeyAsEvent() !?Event {
     const stdin = std.fs.File.stdin();
     const posix = std.posix;
 
-    // Poll for input with 100ms timeout
+    // Poll for input with 16ms timeout (~60fps responsiveness)
     var pfd = [_]posix.pollfd{.{
         .fd = stdin.handle,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
-    const ready = try posix.poll(&pfd, 100);
+    const ready = posix.poll(&pfd, 16) catch |err| {
+        if (err == error.Interrupted) {
+            // SIGWINCH interrupted poll - check for resize
+            if (tui.checkResize()) |new_size| {
+                return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
+            }
+            return null;
+        }
+        return err;
+    };
     if (ready == 0) {
         // Check for resize again after poll timeout
         if (tui.checkResize()) |new_size| {

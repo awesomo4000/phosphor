@@ -61,7 +61,7 @@ pub fn installResizeHandler() void {
             var act: posix.Sigaction = .{
                 .handler = .{ .handler = handleSigwinch },
                 .mask = posix.sigemptyset(),
-                .flags = posix.SA.RESTART, // Restart interrupted syscalls
+                .flags = 0, // Don't restart syscalls - let SIGWINCH interrupt poll()
             };
             _ = posix.sigaction(posix.SIG.WINCH, &act, null);
         },
