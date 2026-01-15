@@ -227,7 +227,8 @@ const ViewResult = struct {
     }
 };
 
-fn view(model: *const Model, allocator: std.mem.Allocator) !ViewResult {
+// Legacy imperative view - kept for reference, use view() instead
+fn viewLegacy(model: *const Model, allocator: std.mem.Allocator) !ViewResult {
     const bounds = calcBounds(model);
 
     var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
@@ -498,7 +499,7 @@ const DeclarativeViewResult = struct {
     }
 };
 
-fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !DeclarativeViewResult {
+fn view(model: *const Model, backing_allocator: std.mem.Allocator) !DeclarativeViewResult {
     // Use arena for frame allocations - everything freed together at end
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
@@ -630,10 +631,10 @@ pub fn main() !void {
 
     // Initial render
     {
-        timer.mark("viewDeclarative() start");
-        var result = try viewDeclarative(&model, allocator);
+        timer.mark("view() start");
+        var result = try view(&model, allocator);
         defer result.deinit();
-        timer.mark("viewDeclarative() done");
+        timer.mark("view() done");
         backend.execute(result.commands);
         timer.mark("backend.execute() done");
     }
@@ -643,7 +644,7 @@ pub fn main() !void {
         try timer.global_timer.dumpToLog(&model.log);
 
         // Re-render to show timing in log
-        var result = try viewDeclarative(&model, allocator);
+        var result = try view(&model, allocator);
         defer result.deinit();
         backend.execute(result.commands);
     }
@@ -672,7 +673,7 @@ pub fn main() !void {
         try update(&model, msg);
 
         // Re-render full view using declarative approach
-        var result = try viewDeclarative(&model, allocator);
+        var result = try view(&model, allocator);
         defer result.deinit();
         backend.execute(result.commands);
     }
