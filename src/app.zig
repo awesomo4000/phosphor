@@ -277,7 +277,7 @@ pub fn App(comptime Module: type) type {
             defer frame_arena.deinit();
 
             // Terminal setup
-            const term = try Terminal.init();
+            var term = try Terminal.init();
             defer term.deinit();
 
             // Screen buffer for rendering
@@ -305,7 +305,17 @@ pub fn App(comptime Module: type) type {
                     term.waitForEvent();
                 }
 
-                // Process all pending events
+                // Check for terminal resize (SIGWINCH)
+                if (term.checkResize()) |resize_event| {
+                    // Resize screen buffer
+                    screen.resize(allocator, resize_event.resize.w, resize_event.resize.h) catch {};
+                    // Send resize message to model
+                    if (msgFromEvent(Msg, resize_event)) |msg| {
+                        if (executeCmd(Module.update(model, msg, allocator))) return;
+                    }
+                }
+
+                // Process all pending input events
                 while (term.pollEvent()) |event| {
                     switch (event) {
                         .key => |key| {
@@ -464,11 +474,17 @@ pub fn App(comptime Module: type) type {
 // Terminal abstraction (minimal for now)
 // ============================================
 
+// Global state for signal handler
+var g_resize_pending: bool = false;
+var g_terminal_fd: ?std.posix.fd_t = null;
+
 const Terminal = struct {
     fd: std.posix.fd_t,
     width: u32,
     height: u32,
     original_termios: ?std.posix.termios,
+
+    const TIOCGWINSZ = if (@import("builtin").os.tag == .macos) 0x40087468 else 0x5413;
 
     pub const Event = union(enum) {
         key: u8,
@@ -479,9 +495,11 @@ const Terminal = struct {
         // Open /dev/tty directly for terminal control
         const fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
 
+        // Store fd for signal handler
+        g_terminal_fd = fd;
+
         // Get terminal size
         var size = std.posix.winsize{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-        const TIOCGWINSZ = if (@import("builtin").os.tag == .macos) 0x40087468 else 0x5413;
         _ = std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&size));
         const width: u32 = if (size.col > 0) size.col else 80;
         const height: u32 = if (size.row > 0) size.row else 24;
@@ -496,6 +514,14 @@ const Terminal = struct {
         raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
         try std.posix.tcsetattr(fd, .FLUSH, raw);
 
+        // Install SIGWINCH handler for resize
+        const act = std.posix.Sigaction{
+            .handler = .{ .handler = handleSigwinch },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
+
         // Enter alt screen, hide cursor
         _ = try std.posix.write(fd, "\x1b[?1049h\x1b[?25l");
 
@@ -507,13 +533,39 @@ const Terminal = struct {
         };
     }
 
+    fn handleSigwinch(_: c_int) callconv(.c) void {
+        g_resize_pending = true;
+    }
+
     pub fn deinit(self: *const Terminal) void {
+        // Clear global state
+        g_terminal_fd = null;
+
         // Restore terminal
         _ = std.posix.write(self.fd, "\x1b[?25h\x1b[?1049l") catch {};
         if (self.original_termios) |orig| {
             std.posix.tcsetattr(self.fd, .FLUSH, orig) catch {};
         }
         std.posix.close(self.fd);
+    }
+
+    /// Check for and consume resize event, returns new size if resized
+    pub fn checkResize(self: *Terminal) ?Event {
+        if (!g_resize_pending) return null;
+        g_resize_pending = false;
+
+        // Query new size
+        var size = std.posix.winsize{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        _ = std.c.ioctl(self.fd, TIOCGWINSZ, @intFromPtr(&size));
+        const new_width: u32 = if (size.col > 0) size.col else 80;
+        const new_height: u32 = if (size.row > 0) size.row else 24;
+
+        if (new_width != self.width or new_height != self.height) {
+            self.width = new_width;
+            self.height = new_height;
+            return .{ .resize = .{ .w = new_width, .h = new_height } };
+        }
+        return null;
     }
 
     pub fn waitForEvent(self: *const Terminal) void {
@@ -559,6 +611,16 @@ const ScreenBuffer = struct {
 
     pub fn deinit(self: *ScreenBuffer, allocator: Allocator) void {
         allocator.free(self.buffer);
+    }
+
+    pub fn resize(self: *ScreenBuffer, allocator: Allocator, width: u32, height: u32) !void {
+        if (self.width == width and self.height == height) return;
+        allocator.free(self.buffer);
+        const size = width * height * 50;
+        self.buffer = try allocator.alloc(u8, size);
+        self.width = width;
+        self.height = height;
+        self.len = 0;
     }
 
     pub fn clear(self: *ScreenBuffer) void {
