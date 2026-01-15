@@ -284,6 +284,41 @@ pub const Renderer = struct {
     pub fn measureDisplayLatency(self: *Renderer) !i128 {
         return terminal.measureDisplayLatency(self.ttyfd);
     }
+
+    /// Resize the renderer to a new terminal size.
+    /// Reallocates both planes and forces a full render on next frame.
+    pub fn resize(self: *Renderer, new_width: u32, new_height: u32) !void {
+        // Skip if size unchanged
+        if (new_width == self.term_width and new_height == self.term_height) return;
+
+        // Create new planes first (may fail)
+        const new_front = try Plane.init(self.allocator, new_width, new_height);
+        errdefer new_front.deinit();
+
+        const new_back = try Plane.init(self.allocator, new_width, new_height);
+        errdefer new_back.deinit();
+
+        // Free old planes
+        self.front_plane.deinit();
+        self.back_plane.deinit();
+
+        // Swap in new planes
+        self.front_plane = new_front;
+        self.back_plane = new_back;
+        self.term_width = new_width;
+        self.term_height = new_height;
+
+        // Clear both planes
+        new_front.clear();
+        new_back.clear();
+
+        // Force full render on next frame
+        self.first_frame = true;
+        self.force_full_render = true;
+
+        // Clear screen to avoid artifacts
+        try terminal.clearScreen(self.ttyfd);
+    }
 };
 
 test "Renderer double buffering" {

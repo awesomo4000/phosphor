@@ -24,6 +24,10 @@ const termios = if (system == .windows) struct {
 
 var original_termios: ?termios = null;
 
+// Module-level state for signal handler access
+var terminal_fd: ?i32 = null;
+var resize_pending: bool = false;
+
 pub fn getTerminalInfo() !TerminalInfo {
     const timer = @import("startup_timer");
     timer.mark("  getTerminalInfo: opening /dev/tty");
@@ -188,11 +192,115 @@ pub fn readKey(fd: i32) ?u8 {
     const O_NONBLOCK = if (@import("builtin").os.tag == .macos) @as(c_int, 0x0004) else std.posix.O.NONBLOCK;
     _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags | O_NONBLOCK) catch return null;
     defer _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags) catch {};
-    
+
     var buf: [1]u8 = undefined;
     const result = std.posix.read(fd, &buf) catch return null;
     if (result > 0) {
         return buf[0];
     }
     return null;
+}
+
+// ============================================================================
+// Signal Handling
+// ============================================================================
+
+/// SIGWINCH handler - just sets flag (signal-safe)
+fn handleSigwinch(_: c_int) callconv(.c) void {
+    resize_pending = true;
+}
+
+/// Cleanup signal handler - restores terminal state AND re-raises signal
+fn handleCleanupSignal(sig: c_int) callconv(.c) void {
+    if (terminal_fd) |fd| {
+        // Restore terminal state (signal-safe writes only)
+        _ = std.posix.write(fd, "\x1b[?2026l") catch {}; // Disable sync output
+        _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
+        _ = std.posix.write(fd, SHOW_CURSOR) catch {};
+        _ = std.posix.write(fd, RESET_ALL) catch {};
+        if (original_termios) |tios| {
+            _ = std.posix.tcsetattr(fd, .FLUSH, tios) catch {};
+        }
+    }
+
+    // Re-raise signal with default handler so process actually dies
+    const sig_num: u6 = @intCast(sig);
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.posix.sigaction(sig_num, &act, null);
+    _ = std.posix.raise(sig_num) catch {};
+}
+
+/// Install signal handlers for cleanup (Ctrl+C, etc.) and resize (SIGWINCH)
+pub fn installSignalHandlers(fd: i32) void {
+    terminal_fd = fd;
+
+    if (system == .windows) return;
+
+    // SIGWINCH for resize - don't restart syscalls (let poll return EINTR)
+    var winch_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigwinch },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.posix.sigaction(std.posix.SIG.WINCH, &winch_act, null);
+
+    // Cleanup signals - SIGINT (Ctrl+C), SIGTERM, SIGHUP
+    var cleanup_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleCleanupSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.posix.sigaction(std.posix.SIG.INT, &cleanup_act, null);
+    _ = std.posix.sigaction(std.posix.SIG.TERM, &cleanup_act, null);
+    _ = std.posix.sigaction(std.posix.SIG.HUP, &cleanup_act, null);
+}
+
+/// Check if resize is pending, returns new size if so
+pub fn checkResize(fd: i32) ?struct { width: u32, height: u32 } {
+    if (!resize_pending) return null;
+    resize_pending = false;
+
+    // Query fresh terminal size
+    var winsize: std.posix.winsize = undefined;
+    switch (system) {
+        .linux => _ = std.os.linux.ioctl(fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize)),
+        .macos => {
+            const TIOCGWINSZ = 0x40087468;
+            _ = std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&winsize));
+        },
+        else => return null,
+    }
+
+    if (winsize.col > 0 and winsize.row > 0) {
+        return .{ .width = winsize.col, .height = winsize.row };
+    }
+    return null;
+}
+
+pub const PollResult = enum { ready, timeout, resize };
+
+/// Poll for input with timeout, handles EINTR from signals
+pub fn pollInput(fd: i32, timeout_ms: i32) !PollResult {
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+
+    const ready = std.posix.poll(&pfd, timeout_ms) catch |err| {
+        if (err == error.Interrupted) {
+            // Signal interrupted poll - check for resize
+            if (resize_pending) return .resize;
+            return .timeout;
+        }
+        return err;
+    };
+
+    if (ready > 0) return .ready;
+    if (resize_pending) return .resize;
+    return .timeout;
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Renderer = @import("renderer.zig").Renderer;
 const blocks = @import("blocks.zig");
 const Cell = @import("cell.zig").Cell;
+pub const terminal = @import("terminal.zig");
 
 /// Main API for terminal pixel rendering
 pub const TerminalPixels = struct {
@@ -138,5 +139,20 @@ pub const TerminalPixels = struct {
     /// Get the terminal file descriptor for keyboard input
     pub fn getTerminalFd(self: *const TerminalPixels) i32 {
         return self.renderer.ttyfd;
+    }
+
+    /// Check for pending resize, returns new pixel resolution if resized.
+    /// Call this in your main loop to handle terminal resize events.
+    pub fn checkResize(self: *TerminalPixels) ?struct { width: u32, height: u32 } {
+        if (terminal.checkResize(self.renderer.ttyfd)) |new_size| {
+            // Resize the renderer's planes
+            self.renderer.resize(new_size.width, new_size.height) catch return null;
+            // Return new pixel resolution (2x terminal chars for block characters)
+            return .{
+                .width = new_size.width * 2,
+                .height = new_size.height * 2,
+            };
+        }
+        return null;
     }
 };
