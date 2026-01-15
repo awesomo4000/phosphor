@@ -3,8 +3,8 @@ const render_commands = @import("render_commands.zig");
 const DrawCommand = render_commands.DrawCommand;
 const BoxStyle = render_commands.BoxStyle;
 
-// Thermite imports for ThermiteBackend
-const thermite = @import("thermite/root.zig");
+// Thermite imports for ThermiteBackend (use module import, not path)
+const thermite = @import("thermite");
 const ThermiteRenderer = thermite.Renderer;
 const ThermiteCell = thermite.Cell;
 const DEFAULT_COLOR = thermite.DEFAULT_COLOR;

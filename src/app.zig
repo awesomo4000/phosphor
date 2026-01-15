@@ -1,6 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const thermite = @import("thermite");
+const phosphor = @import("phosphor");
+
+// Re-export phosphor types for text-based apps
+pub const DrawCommand = phosphor.DrawCommand;
+pub const LayoutNode = phosphor.LayoutNode;
+pub const Rect = phosphor.Rect;
+pub const renderTree = phosphor.renderTree;
 
 /// Backend selection for rendering
 pub const Backend = enum {
@@ -149,6 +156,15 @@ pub const Node = struct {
         row: []*Node,
         flex: Flex,
         fixed: Fixed,
+        /// Phosphor layout node - for text-based UIs
+        layout: LayoutRef,
+    };
+
+    /// Reference to a phosphor LayoutNode tree
+    pub const LayoutRef = struct {
+        node: *const LayoutNode,
+        cursor_x: ?u16 = null,
+        cursor_y: ?u16 = null,
     };
 
     /// Type-erased canvas reference (for generic Canvas(Ctx))
@@ -247,6 +263,24 @@ pub const Ui = struct {
     pub fn fixed(self: *Ui, size: u16, child: *Node) *Node {
         const node = self.ally.create(Node) catch @panic("OOM");
         node.* = .{ .data = .{ .fixed = .{ .size = size, .child = child } } };
+        return node;
+    }
+
+    /// Create a layout node wrapping a phosphor LayoutNode tree
+    pub fn layout(self: *Ui, layout_node: *const LayoutNode) *Node {
+        const node = self.ally.create(Node) catch @panic("OOM");
+        node.* = .{ .data = .{ .layout = .{ .node = layout_node } } };
+        return node;
+    }
+
+    /// Create a layout node with cursor position
+    pub fn layoutWithCursor(self: *Ui, layout_node: *const LayoutNode, cursor_x: u16, cursor_y: u16) *Node {
+        const node = self.ally.create(Node) catch @panic("OOM");
+        node.* = .{ .data = .{ .layout = .{
+            .node = layout_node,
+            .cursor_x = cursor_x,
+            .cursor_y = cursor_y,
+        } } };
         return node;
     }
 };
@@ -406,22 +440,26 @@ pub fn App(comptime Module: type) type {
             // Install signal handlers (SIGINT cleanup + SIGWINCH resize)
             thermite.terminal.installSignalHandlers(renderer.getTerminalFd());
 
-            // Get initial pixel resolution
-            const max_res = renderer.maxResolution();
-            var pixel_width = max_res.width;
-            var pixel_height = max_res.height;
-
             // UI builder using frame arena
             var ui = Ui{ .ally = frame_arena.allocator() };
 
             // Timing
             var last_frame = std.time.milliTimestamp();
 
-            // Send initial resize (pixel dimensions)
-            if (executeCmd(Module.update(model, msgFromResize(Msg, pixel_width, pixel_height), allocator))) return;
-
-            // Build initial view
+            // Build initial view to detect type (layout vs canvas)
             var root = Module.view(model, &ui);
+
+            // Send initial resize with appropriate dimensions based on view type
+            // Layout nodes use cell dimensions, canvas nodes use pixel dimensions
+            const is_layout = findLayoutRef(root) != null;
+            const initial_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
+            const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
+            if (executeCmd(Module.update(model, msgFromResize(Msg, initial_width, initial_height), allocator))) return;
+
+            // Rebuild view with correct dimensions
+            _ = frame_arena.reset(.retain_capacity);
+            ui.ally = frame_arena.allocator();
+            root = Module.view(model, &ui);
 
             const term_fd = renderer.getTerminalFd();
 
@@ -458,11 +496,12 @@ pub fn App(comptime Module: type) type {
                 }
 
                 // Check for terminal resize
-                if (renderer.checkResize()) |new_res| {
-                    pixel_width = new_res.width;
-                    pixel_height = new_res.height;
+                if (renderer.checkResize()) |_| {
+                    // Send resize with appropriate dimensions based on view type
                     if (@hasField(Msg, "resize")) {
-                        const msg = @unionInit(Msg, "resize", Size{ .w = pixel_width, .h = pixel_height });
+                        const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
+                        const new_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
+                        const msg = @unionInit(Msg, "resize", Size{ .w = new_width, .h = new_height });
                         if (executeCmd(Module.update(model, msg, allocator))) return;
                     }
                 }
@@ -485,19 +524,40 @@ pub fn App(comptime Module: type) type {
 
                 root = Module.view(model, &ui);
 
-                // Render: find canvas in view tree and send to thermite
+                // Render based on node type
                 if (findCanvasRef(root)) |ref| {
-                    // Call render function
+                    // Canvas: render pixels
                     if (ref.render_fn) |render_fn| {
                         render_fn(ref.render_ctx);
                     }
-                    // Send pixels to thermite
                     try renderer.setPixels(ref.pixels.*, ref.width.*, ref.height.*);
                     try renderer.presentOptimized();
 
-                    // Draw overlay text (status bar) if present
                     if (ref.overlay_text) |text| {
                         drawOverlayText(renderer.ttyfd, renderer.term_width, renderer.term_height, text);
+                    }
+                } else if (findLayoutRef(root)) |ref| {
+                    // Layout: render text via draw commands
+                    // Clear back buffer first to remove stale content
+                    renderer.clearBackBuffer();
+
+                    const bounds = Rect{
+                        .x = 0,
+                        .y = 0,
+                        .w = @intCast(renderer.term_width),
+                        .h = @intCast(renderer.term_height),
+                    };
+                    const commands = try renderTree(ref.node, bounds, frame_arena.allocator());
+                    executeDrawCommands(renderer, commands);
+                    try renderer.renderDifferential();
+
+                    // Position and show cursor AFTER render
+                    if (ref.cursor_x) |cx| {
+                        if (ref.cursor_y) |cy| {
+                            var pos_buf: [32]u8 = undefined;
+                            const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cy + 1, cx + 1 }) catch continue;
+                            _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                        }
                     }
                 }
 
@@ -531,6 +591,88 @@ pub fn App(comptime Module: type) type {
                 else => {},
             }
             return null;
+        }
+
+        /// Find first layout in view tree
+        fn findLayoutRef(node: *Node) ?Node.LayoutRef {
+            switch (node.data) {
+                .layout => |ref| return ref,
+                .column => |children| {
+                    for (children) |child| {
+                        if (findLayoutRef(child)) |ref| return ref;
+                    }
+                },
+                .row => |children| {
+                    for (children) |child| {
+                        if (findLayoutRef(child)) |ref| return ref;
+                    }
+                },
+                .flex => |f| return findLayoutRef(f.child),
+                .fixed => |f| return findLayoutRef(f.child),
+                else => {},
+            }
+            return null;
+        }
+
+        /// Execute draw commands on thermite renderer's back buffer
+        fn executeDrawCommands(renderer: *thermite.Renderer, commands: []const DrawCommand) void {
+            var cur_x: u32 = 0;
+            var cur_y: u32 = 0;
+            var cur_fg: u32 = thermite.DEFAULT_COLOR;
+            var cur_bg: u32 = thermite.DEFAULT_COLOR;
+
+            for (commands) |cmd| {
+                switch (cmd) {
+                    .move_cursor => |pos| {
+                        cur_x = pos.x;
+                        cur_y = pos.y;
+                    },
+                    .draw_text => |text| {
+                        // Decode UTF-8 to get codepoints
+                        var i: usize = 0;
+                        while (i < text.text.len) {
+                            const byte = text.text[i];
+                            const codepoint_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+                            const codepoint = if (i + codepoint_len <= text.text.len)
+                                std.unicode.utf8Decode(text.text[i..][0..codepoint_len]) catch byte
+                            else
+                                byte;
+
+                            if (cur_x < renderer.term_width and cur_y < renderer.term_height) {
+                                renderer.back_plane.setCell(cur_x, cur_y, .{
+                                    .ch = codepoint,
+                                    .fg = cur_fg,
+                                    .bg = cur_bg,
+                                });
+                                cur_x += 1;
+                            }
+                            i += codepoint_len;
+                        }
+                    },
+                    .clear_screen => {
+                        renderer.clearBackBuffer();
+                        cur_x = 0;
+                        cur_y = 0;
+                    },
+                    .clear_line => {
+                        var x = cur_x;
+                        while (x < renderer.term_width) : (x += 1) {
+                            renderer.back_plane.setCell(x, cur_y, thermite.Cell.init());
+                        }
+                    },
+                    .set_color => |color| {
+                        if (color.fg) |fg| cur_fg = @intFromEnum(fg);
+                        if (color.bg) |bg| cur_bg = @intFromEnum(bg);
+                    },
+                    .reset_attributes => {
+                        cur_fg = thermite.DEFAULT_COLOR;
+                        cur_bg = thermite.DEFAULT_COLOR;
+                    },
+                    // show_cursor and flush are handled after renderDifferential
+                    .show_cursor, .flush => {},
+                    else => {},
+                }
+            }
         }
 
         /// Find first on_key handler in view tree (depth-first)
@@ -649,6 +791,10 @@ pub fn App(comptime Module: type) type {
                 .fixed => |f| {
                     _ = f;
                     // TODO: handle fixed sizing
+                },
+                .layout => {
+                    // Layout nodes are handled separately in runThermite/runSimple
+                    // For now, just ignore in this legacy renderer
                 },
             }
         }

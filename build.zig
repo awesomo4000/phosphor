@@ -44,13 +44,14 @@ pub fn build(b: *std.Build) void {
     });
     logview.addImport("phosphor", phosphor);
 
-    // App module (new Elm-style architecture experiment)
+    // App module (Elm-style architecture)
     const app_mod = b.addModule("app", .{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
         .optimize = optimize,
     });
     app_mod.addImport("thermite", thermite);
+    app_mod.addImport("phosphor", phosphor);
 
     // ============================================
     // Examples
@@ -64,7 +65,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const examples = [_]Example{
-        .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "phosphor", "repl", "logview" } },
+        .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview" } },
         // App architecture demos (Elm-style)
         .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },
