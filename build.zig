@@ -66,6 +66,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]Example{
         .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "phosphor", "repl", "logview" } },
         .{ .name = "mandelbrot", .path = "examples/thermite/mandelbrot.zig", .deps = &.{"thermite"} },
+        .{ .name = "mandelbrot-v2", .path = "examples/mandelbrot_v2.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/thermite/sprites.zig", .deps = &.{"thermite"} },
         .{ .name = "hypercube", .path = "examples/thermite/hypercube.zig", .deps = &.{"thermite"} },
         .{ .name = "app-demo", .path = "examples/app_demo.zig", .deps = &.{"app"} },
