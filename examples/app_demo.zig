@@ -36,19 +36,30 @@ pub fn init() Model {
     return .{};
 }
 
+/// Calculate box size - shrinks when canvas is small
+fn boxSize(canvas_dim: u32) u32 {
+    if (canvas_dim >= 30) return 20; // Normal size
+    if (canvas_dim < 2) return 1; // Minimum 1 pixel
+    // Scale down: at 30 -> 20, at 2 -> 1
+    return @max(1, (canvas_dim * 2) / 3);
+}
+
 pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
     switch (msg) {
         .tick => |dt| {
             if (model.is_paused) return .none;
-            if (model.canvas.width < 30 or model.canvas.height < 30) return .none;
+            if (model.canvas.width == 0 or model.canvas.height == 0) return .none;
+
+            const box_w = boxSize(model.canvas.width);
+            const box_h = boxSize(model.canvas.height);
 
             // Update position
             model.box_x += model.vel_x * dt;
             model.box_y += model.vel_y * dt;
 
-            // Bounce off walls
-            const max_x = @as(f32, @floatFromInt(model.canvas.width - 20));
-            const max_y = @as(f32, @floatFromInt(model.canvas.height - 20));
+            // Bounce off walls (ensure max is at least 0)
+            const max_x: f32 = @floatFromInt(@max(box_w, model.canvas.width) - box_w);
+            const max_y: f32 = @floatFromInt(@max(box_h, model.canvas.height) - box_h);
 
             if (model.box_x <= 0 or model.box_x >= max_x) {
                 model.vel_x = -model.vel_x;
@@ -85,10 +96,12 @@ fn render(model: *Model) void {
     // Clear with dark blue
     model.canvas.clear(0x102040FF);
 
-    // Draw bouncing box
+    // Draw bouncing box (size adapts to canvas)
+    const box_w = boxSize(model.canvas.width);
+    const box_h = boxSize(model.canvas.height);
     const x: i32 = @intFromFloat(model.box_x);
     const y: i32 = @intFromFloat(model.box_y);
-    model.canvas.drawRect(x, y, 20, 20, 0xFF8000FF); // Orange box
+    model.canvas.drawRect(x, y, box_w, box_h, 0xFF8000FF); // Orange box
 
     // Draw border
     const w = model.canvas.width;
