@@ -504,9 +504,15 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    // Build widget view trees
-    var log_view = try model.log.viewTree(model.size.cols, alloc);
+    // Build repl view first to get its height
     var repl_view = try model.repl.viewTree(model.size.cols, alloc);
+    const repl_height = repl_view.getHeight();
+
+    // Calculate available height for log (screen - header - separator - repl)
+    const log_available_height = model.size.rows -| Model.header_height -| repl_height;
+
+    // Build log view with height constraint
+    var log_view = try model.log.viewTree(model.size.cols, log_available_height, alloc);
 
     // Build size indicator text
     const size_text = try std.fmt.allocPrint(alloc, "{d}x{d}", .{ model.size.cols, model.size.rows });
@@ -597,8 +603,13 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
 // ─────────────────────────────────────────────────────────────
 
 pub fn main() !void {
+    // Enable timing if PHOSPHOR_DEBUG_TIMING=1
     const timer = @import("phosphor").startup_timer;
-    timer.reset();
+    if (std.posix.getenv("PHOSPHOR_DEBUG_TIMING")) |val| {
+        if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
+            timer.enable();
+        }
+    }
     timer.mark("main() entry");
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -617,21 +628,21 @@ pub fn main() !void {
     defer model.deinit();
     timer.mark("Model.init() done");
 
-    // Initial render (using new declarative view)
+    // Initial render
     {
         timer.mark("viewDeclarative() start");
         var result = try viewDeclarative(&model, allocator);
         defer result.deinit();
         timer.mark("viewDeclarative() done");
         backend.execute(result.commands);
-        timer.mark("backend.execute() done - first frame visible");
+        timer.mark("backend.execute() done");
     }
 
-    // Dump timing to log
-    try timer.global_timer.dumpToLog(&model.log);
+    // Dump timing to log if enabled
+    if (timer.isEnabled()) {
+        try timer.global_timer.dumpToLog(&model.log);
 
-    // Re-render to show timing
-    {
+        // Re-render to show timing in log
         var result = try viewDeclarative(&model, allocator);
         defer result.deinit();
         backend.execute(result.commands);

@@ -2,6 +2,7 @@ const std = @import("std");
 
 /// Simple startup timer for debugging initialization delays.
 /// Stores timestamps that can be displayed after startup completes.
+/// Set `enabled = true` to activate; when disabled, mark() is a no-op.
 pub const StartupTimer = struct {
     const MAX_EVENTS = 64;
 
@@ -9,6 +10,7 @@ pub const StartupTimer = struct {
     count: usize = 0,
     start_time: i128 = 0,
     initialized: bool = false,
+    enabled: bool = false,
 
     pub const Event = struct {
         label: []const u8,
@@ -16,6 +18,8 @@ pub const StartupTimer = struct {
     };
 
     pub fn markEvent(self: *StartupTimer, label: []const u8) void {
+        if (!self.enabled) return;
+
         // Lazy init on first mark
         if (!self.initialized) {
             self.start_time = std.time.nanoTimestamp();
@@ -70,4 +74,12 @@ pub fn mark(label: []const u8) void {
 
 pub fn reset() void {
     global_timer.resetTimer();
+}
+
+pub fn enable() void {
+    global_timer.enabled = true;
+}
+
+pub fn isEnabled() bool {
+    return global_timer.enabled;
 }

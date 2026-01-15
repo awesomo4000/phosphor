@@ -119,9 +119,10 @@ pub const LogView = struct {
 
     /// Returns a declarative layout tree for the log view.
     /// Width is used for wrapping long lines.
+    /// Height limits how many lines are shown (pass available screen rows).
     /// Returns a ViewTree that can build LayoutNodes.
-    pub fn viewTree(self: *const LogView, width: u16, frame_alloc: Allocator) !ViewTree {
-        const visible = self.getVisibleLines(self.lines.items.len);
+    pub fn viewTree(self: *const LogView, width: u16, height: u16, frame_alloc: Allocator) !ViewTree {
+        const visible = self.getVisibleLines(height);
 
         // First pass: count total rows needed (including wrapped lines)
         var total_rows: usize = 0;

@@ -582,6 +582,12 @@ pub const ThermiteBackend = struct {
         try self.renderer.renderDifferential();
     }
 
+    /// Measure actual display latency using terminal round-trip sync.
+    /// Returns nanoseconds from write to terminal acknowledgment.
+    pub fn measureDisplayLatency(self: *ThermiteBackend) !i128 {
+        return self.renderer.measureDisplayLatency();
+    }
+
     fn executeImpl(ptr: *anyopaque, cmds: []const DrawCommand) void {
         const self: *ThermiteBackend = @ptrCast(@alignCast(ptr));
 
