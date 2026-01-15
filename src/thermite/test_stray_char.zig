@@ -5,7 +5,6 @@ const Renderer = @import("renderer.zig").Renderer;
 const Plane = @import("plane.zig").Plane;
 const Cell = @import("cell.zig").Cell;
 const blocks = @import("blocks.zig");
-const api = @import("api.zig");
 
 test "find stray 6 in gradient rendering" {
     const allocator = testing.allocator;

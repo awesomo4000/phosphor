@@ -395,7 +395,7 @@ pub fn App(comptime Module: type) type {
             defer frame_arena.deinit();
 
             // Initialize thermite renderer
-            const renderer = try thermite.TerminalPixels.init(allocator);
+            const renderer = try thermite.Renderer.init(allocator);
             defer renderer.deinit();
 
             // Install signal handlers (SIGINT cleanup + SIGWINCH resize)

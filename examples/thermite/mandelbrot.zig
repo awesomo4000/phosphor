@@ -109,7 +109,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Initialize renderer
-    const renderer = try lib.TerminalPixels.init(allocator);
+    const renderer = try lib.Renderer.init(allocator);
     defer renderer.deinit();
 
     // Install signal handlers for clean Ctrl+C exit

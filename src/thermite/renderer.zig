@@ -100,6 +100,9 @@ pub const Renderer = struct {
         self.back_plane.clear();
     }
 
+    /// Alias for clearBackBuffer (backwards compatibility with TerminalPixels API)
+    pub const clear = clearBackBuffer;
+
     /// Render the back buffer to the terminal
     pub fn render(self: *Renderer) !void {
         self.output_buffer.clearRetainingCapacity();
@@ -274,6 +277,9 @@ pub const Renderer = struct {
         self.force_full_render = false;
     }
 
+    /// Alias for renderDifferential (backwards compatibility with TerminalPixels API)
+    pub const present = renderDifferential;
+
     /// Sync with terminal - blocks until terminal has actually rendered.
     /// Useful for measuring real display latency vs write latency.
     pub fn sync(self: *Renderer) !void {
@@ -283,6 +289,87 @@ pub const Renderer = struct {
     /// Measure display latency in nanoseconds.
     pub fn measureDisplayLatency(self: *Renderer) !i128 {
         return terminal.measureDisplayLatency(self.ttyfd);
+    }
+
+    // =========================================================================
+    // Pixel rendering mode - for graphics/visualization applications
+    // Each terminal cell represents a 2x2 pixel block using Unicode block chars
+    // =========================================================================
+
+    /// Set pixels from a buffer and convert to terminal cells.
+    /// pixels: Array of RGBA values (0xRRGGBBAA format)
+    /// This converts 2x2 pixel blocks to Unicode block characters.
+    pub fn setPixels(self: *Renderer, pixels: []const u32, width: u32, height: u32) !void {
+        const blocks = @import("blocks.zig");
+
+        // Convert pixels to block characters
+        const block_mappings = try blocks.pixelBufferToBlocks(
+            pixels,
+            width,
+            height,
+            self.allocator,
+        );
+        defer self.allocator.free(block_mappings);
+
+        // Clear back buffer
+        self.clearBackBuffer();
+
+        // Calculate dimensions
+        const block_width = (width + 1) / 2;
+        const block_height = (height + 1) / 2;
+
+        // Render blocks to back buffer
+        for (0..block_height) |y| {
+            for (0..block_width) |x| {
+                if (x >= self.term_width or y >= self.term_height) continue;
+
+                const block = block_mappings[y * block_width + x];
+                self.back_plane.setCell(@intCast(x), @intCast(y), .{
+                    .ch = block.ch,
+                    .fg = block.fg,
+                    .bg = block.bg,
+                });
+            }
+        }
+    }
+
+    /// Render using optimized batching (faster for pixel graphics).
+    /// Batches consecutive cells with same colors to reduce escape sequences.
+    pub fn presentOptimized(self: *Renderer) !void {
+        const renderOptimized = @import("optimized_renderer.zig").renderOptimized;
+        try renderOptimized(self);
+    }
+
+    /// Get the maximum pixel resolution based on terminal size.
+    /// Each character cell represents 2x2 pixels.
+    pub fn maxPixelResolution(self: *const Renderer) struct { width: u32, height: u32 } {
+        return .{
+            .width = self.term_width * 2,
+            .height = self.term_height * 2,
+        };
+    }
+
+    /// Alias for maxPixelResolution (backwards compatibility)
+    pub const maxResolution = maxPixelResolution;
+
+    /// Check for pending resize, returns new pixel resolution if resized.
+    /// Call this in your main loop to handle terminal resize events.
+    pub fn checkResize(self: *Renderer) ?struct { width: u32, height: u32 } {
+        if (terminal.checkResize(self.ttyfd)) |new_size| {
+            // Resize the planes
+            self.resize(new_size.width, new_size.height) catch return null;
+            // Return new pixel resolution (2x terminal chars for block characters)
+            return .{
+                .width = new_size.width * 2,
+                .height = new_size.height * 2,
+            };
+        }
+        return null;
+    }
+
+    /// Get the terminal file descriptor for keyboard input.
+    pub fn getTerminalFd(self: *const Renderer) i32 {
+        return self.ttyfd;
     }
 
     /// Resize the renderer to a new terminal size.

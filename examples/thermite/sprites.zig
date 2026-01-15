@@ -41,7 +41,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Initialize terminal renderer
-    const renderer = try lib.TerminalPixels.init(allocator);
+    const renderer = try lib.Renderer.init(allocator);
     defer renderer.deinit();
 
     const term_fd = renderer.getTerminalFd();
