@@ -257,5 +257,5 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    try app.App(@This()).run(gpa.allocator(), .{ .backend = .thermite, .target_fps = 0 });
+    try app.App(@This()).run(gpa.allocator(), .{ .backend = .thermite, .target_fps = 120 });
 }
