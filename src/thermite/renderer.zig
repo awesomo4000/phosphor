@@ -21,18 +21,25 @@ pub const Renderer = struct {
     first_frame: bool = true,
 
     pub fn init(allocator: std.mem.Allocator) !*Renderer {
+        const timer = @import("../startup_timer.zig");
+        timer.mark("Renderer.init() entry");
+
         const renderer = try allocator.create(Renderer);
         errdefer allocator.destroy(renderer);
+        timer.mark("Renderer struct allocated");
 
         // Get terminal info
         const tinfo = try terminal.getTerminalInfo();
-        
+        timer.mark("getTerminalInfo() done");
+
         // Create double buffers
         const front = try Plane.init(allocator, tinfo.width, tinfo.height);
         errdefer front.deinit();
-        
+        timer.mark("front Plane.init() done");
+
         const back = try Plane.init(allocator, tinfo.width, tinfo.height);
         errdefer back.deinit();
+        timer.mark("back Plane.init() done");
 
         renderer.* = .{
             .front_plane = front,
@@ -46,12 +53,18 @@ pub const Renderer = struct {
 
         // Initialize terminal
         try terminal.enterRawMode(renderer.ttyfd);
+        timer.mark("enterRawMode() done");
+
         try terminal.hideCursor(renderer.ttyfd);
+        timer.mark("hideCursor() done");
+
         try terminal.clearScreen(renderer.ttyfd);
-        
+        timer.mark("clearScreen() done");
+
         // Initialize front buffer to match cleared screen
         front.clear();
         back.clear();
+        timer.mark("buffers cleared");
 
         return renderer;
     }
@@ -166,6 +179,9 @@ pub const Renderer = struct {
         self.output_buffer.clearRetainingCapacity();
         const writer = self.output_buffer.writer(self.allocator);
 
+        // Begin synchronized output mode (reduces flicker)
+        try writer.writeAll("\x1b[?2026h");
+
         // Force full render on first frame
         const force_full = self.first_frame;
         if (self.first_frame) {
@@ -240,13 +256,27 @@ pub const Renderer = struct {
             }
         }
 
-        // Write to terminal if there were changes
+        // End synchronized output mode (tells terminal to display the frame)
+        try writer.writeAll("\x1b[?2026l");
+
+        // Write to terminal
         if (self.output_buffer.items.len > 0) {
             _ = try std.posix.write(self.ttyfd, self.output_buffer.items);
         }
 
         // Copy back buffer to front buffer
         self.front_plane.copyFrom(self.back_plane);
+    }
+
+    /// Sync with terminal - blocks until terminal has actually rendered.
+    /// Useful for measuring real display latency vs write latency.
+    pub fn sync(self: *Renderer) !void {
+        try terminal.sync(self.ttyfd);
+    }
+
+    /// Measure display latency in nanoseconds.
+    pub fn measureDisplayLatency(self: *Renderer) !i128 {
+        return terminal.measureDisplayLatency(self.ttyfd);
     }
 };
 

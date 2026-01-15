@@ -23,11 +23,15 @@ const termios = if (system == .windows) struct {
 var original_termios: ?termios = null;
 
 pub fn getTerminalInfo() !TerminalInfo {
+    const timer = @import("../startup_timer.zig");
+    timer.mark("  getTerminalInfo: opening /dev/tty");
+
     const tty_fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
-    
+    timer.mark("  getTerminalInfo: /dev/tty opened");
+
     // Get terminal size
     var winsize: std.posix.winsize = undefined;
-    
+
     // Platform-specific ioctl
     switch (system) {
         .linux => _ = try std.os.linux.ioctl(tty_fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize)),
@@ -38,6 +42,7 @@ pub fn getTerminalInfo() !TerminalInfo {
         },
         else => return error.UnsupportedPlatform,
     }
+    timer.mark("  getTerminalInfo: ioctl done");
 
     return TerminalInfo{
         .fd = tty_fd,
@@ -47,14 +52,18 @@ pub fn getTerminalInfo() !TerminalInfo {
 }
 
 pub fn enterRawMode(fd: i32) !void {
+    const timer = @import("../startup_timer.zig");
+
     if (system == .windows) {
         // TODO: Windows console mode
         return;
     }
 
+    timer.mark("  enterRawMode: tcgetattr start");
     // Save original terminal settings
     var tios = try std.posix.tcgetattr(fd);
     original_termios = tios;
+    timer.mark("  enterRawMode: tcgetattr done");
 
     // Modify for raw mode
     // Turn off:
@@ -75,10 +84,13 @@ pub fn enterRawMode(fd: i32) !void {
     tios.cc[@intFromEnum(std.posix.V.MIN)] = 0;
     tios.cc[@intFromEnum(std.posix.V.TIME)] = 1;
 
+    timer.mark("  enterRawMode: tcsetattr FLUSH start");
     _ = try std.posix.tcsetattr(fd, .FLUSH, tios);
-    
-    // Enable synchronized output mode if supported (reduces flicker)
-    _ = std.posix.write(fd, "\x1b[?2026h") catch {};
+    timer.mark("  enterRawMode: tcsetattr FLUSH done");
+
+    // NOTE: Don't enable sync output mode here - it buffers subsequent writes
+    // (hideCursor, clearScreen) until the end marker is sent. Instead, sync
+    // mode is enabled/disabled per-frame in renderDifferential().
 }
 
 pub fn exitRawMode(fd: i32) !void {
@@ -96,6 +108,38 @@ pub fn exitRawMode(fd: i32) !void {
 
 pub fn clearScreen(fd: i32) !void {
     _ = try std.posix.write(fd, CLEAR_SCREEN ++ CURSOR_HOME);
+}
+
+/// Sync with the terminal - blocks until terminal has processed all prior output.
+/// Uses a cursor position query (DSR) as a round-trip barrier.
+/// Useful for measuring actual display latency vs write latency.
+pub fn sync(fd: i32) !void {
+    // Send Device Status Report - cursor position query
+    _ = try std.posix.write(fd, "\x1b[6n");
+
+    // Read until we get the response: \x1b[{row};{col}R
+    // The response arriving means terminal has processed everything before the query
+    var buf: [32]u8 = undefined;
+    var total_read: usize = 0;
+
+    while (total_read < buf.len) {
+        const n = try std.posix.read(fd, buf[total_read..]);
+        if (n == 0) break;
+        total_read += n;
+
+        // Look for 'R' which terminates the cursor position response
+        if (std.mem.indexOfScalar(u8, buf[0..total_read], 'R') != null) {
+            break;
+        }
+    }
+}
+
+/// Measure time for terminal to actually render (not just write completion).
+/// Returns elapsed nanoseconds from write to terminal acknowledgment.
+pub fn measureDisplayLatency(fd: i32) !i128 {
+    const start = std.time.nanoTimestamp();
+    try sync(fd);
+    return std.time.nanoTimestamp() - start;
 }
 
 pub fn hideCursor(fd: i32) !void {

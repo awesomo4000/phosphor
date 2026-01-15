@@ -597,20 +597,40 @@ fn viewDeclarative(model: *const Model, backing_allocator: std.mem.Allocator) !D
 // ─────────────────────────────────────────────────────────────
 
 pub fn main() !void {
+    const timer = @import("phosphor").startup_timer;
+    timer.reset();
+    timer.mark("main() entry");
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    timer.mark("GPA initialized");
 
     // Initialize Thermite backend (double-buffered, differential rendering)
     var thermite_backend = try ThermiteBackend.init(allocator);
     defer thermite_backend.deinit();
     const backend = thermite_backend.backend();
+    timer.mark("ThermiteBackend.init() done");
 
     // Initialize model
     var model = try Model.init(allocator, backend.getSize());
     defer model.deinit();
+    timer.mark("Model.init() done");
 
     // Initial render (using new declarative view)
+    {
+        timer.mark("viewDeclarative() start");
+        var result = try viewDeclarative(&model, allocator);
+        defer result.deinit();
+        timer.mark("viewDeclarative() done");
+        backend.execute(result.commands);
+        timer.mark("backend.execute() done - first frame visible");
+    }
+
+    // Dump timing to log
+    try timer.global_timer.dumpToLog(&model.log);
+
+    // Re-render to show timing
     {
         var result = try viewDeclarative(&model, allocator);
         defer result.deinit();
