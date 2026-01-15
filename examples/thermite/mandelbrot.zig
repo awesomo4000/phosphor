@@ -62,25 +62,39 @@ const zoom_targets = [_]ZoomTarget{
 
 /// Draw status bar at bottom of screen
 fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused: bool, target_name: []const u8, zoom: f64) void {
+    // Skip if terminal too small
+    if (term_width < 20 or term_height < 5) return;
+
     var buf: [256]u8 = undefined;
 
     // Move to bottom row, set white on black
     const prefix = std.fmt.bufPrint(&buf, "\x1b[{};1H\x1b[0m\x1b[97;40m", .{term_height}) catch return;
     _ = std.posix.write(fd, prefix) catch {};
 
-    // Build status text
-    const state = if (is_paused) "PAUSED" else "RUNNING";
+    // Build status text - use shorter format for narrow terminals
+    // Fixed widths: FPS=3 digits, Zoom=9 chars (e.g. "1.23e-04")
     var status_buf: [200]u8 = undefined;
-    const status = std.fmt.bufPrint(&status_buf, " {s} | FPS: {} | {s} | Zoom: {e:.2} | [SPACE]=pause [Q]=quit ", .{ state, fps, target_name, zoom }) catch return;
+    const status = if (term_width >= 80)
+        std.fmt.bufPrint(&status_buf, " {s: <7} | FPS:{d:>3} | {s: <16} | Zoom:{e:>9.2} | [SPC]=pause [Q]=quit ", .{
+            if (is_paused) "PAUSED" else "RUNNING", fps, target_name, zoom,
+        }) catch return
+    else if (term_width >= 50)
+        std.fmt.bufPrint(&status_buf, " {s: <5} FPS:{d:>3} {s} ", .{
+            if (is_paused) "PAUSE" else "RUN", fps, target_name,
+        }) catch return
+    else
+        std.fmt.bufPrint(&status_buf, " {s} {d:>3}", .{
+            if (is_paused) "P" else "R", fps,
+        }) catch return;
 
-    // Pad to terminal width
-    _ = std.posix.write(fd, status) catch {};
+    // Truncate to terminal width and write
+    const write_len = @min(status.len, term_width);
+    _ = std.posix.write(fd, status[0..write_len]) catch {};
 
     // Fill rest of line with spaces
-    const remaining = if (term_width > status.len) term_width - @as(u32, @intCast(status.len)) else 0;
-    var spaces: [200]u8 = undefined;
-    if (remaining > 0) {
-        const fill_len = @min(remaining, 200);
+    if (term_width > write_len) {
+        var spaces: [200]u8 = undefined;
+        const fill_len = @min(term_width - @as(u32, @intCast(write_len)), 200);
         @memset(spaces[0..fill_len], ' ');
         _ = std.posix.write(fd, spaces[0..fill_len]) catch {};
     }
@@ -103,10 +117,10 @@ pub fn main() !void {
 
     // Get resolution (reserve bottom row for status bar)
     const max_res = renderer.maxResolution();
-    const term_width = max_res.width / 2; // Terminal chars
-    const term_height = max_res.height / 2;
-    const width: u32 = max_res.width;
-    const height: u32 = max_res.height - 2; // Leave 1 row (2 pixels) for status
+    var term_width: u32 = max_res.width / 2; // Terminal chars
+    var term_height: u32 = max_res.height / 2;
+    var width: u32 = max_res.width;
+    var height: u32 = max_res.height - 2; // Leave 1 row (2 pixels) for status
 
     var pixels = try allocator.alloc(u32, width * height);
     defer allocator.free(pixels);
@@ -125,6 +139,7 @@ pub fn main() !void {
     var fps_frame_count: u32 = 0;
     var fps_last_time = std.time.milliTimestamp();
 
+
     const term_fd = renderer.getTerminalFd();
 
     // Initial clear
@@ -139,6 +154,18 @@ pub fn main() !void {
             if (key == ' ') is_paused = !is_paused;
         }
 
+        // Check for terminal resize
+        if (renderer.checkResize()) |new_res| {
+            allocator.free(pixels);
+            width = new_res.width;
+            height = new_res.height - 2; // Leave room for status bar
+            term_width = new_res.width / 2;
+            term_height = new_res.height / 2;
+            pixels = try allocator.alloc(u32, width * height);
+            renderer.clear();
+            try renderer.present();
+        }
+
         // Update FPS counter
         const now = std.time.milliTimestamp();
         if (now - fps_last_time >= 1000) {
@@ -147,13 +174,16 @@ pub fn main() !void {
             fps_last_time = now;
         }
 
-        // Always draw status bar
-        drawStatusBar(term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
-
-        // If paused, just sleep and continue
+        // If paused, update status bar (20Hz due to 50ms sleep) and continue
         if (is_paused) {
+            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
             std.Thread.sleep(50 * std.time.ns_per_ms);
             continue;
+        }
+
+        // Update status bar every 7 frames (~10 Hz at 70fps)
+        if (frame % 7 == 0) {
+            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
         }
 
         // Count this frame
@@ -193,10 +223,7 @@ pub fn main() !void {
             current_target = zoom_targets[target_index];
             zoom = 3.0;
             max_iter = 32;
-            renderer.clear();
-            try renderer.present();
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-            continue;
+            // Don't clear/present here - next frame will render the new target
         }
 
         // Update zoom
