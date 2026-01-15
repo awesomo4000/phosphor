@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sprites", .path = "examples/thermite/sprites.zig", .deps = &.{"thermite"} },
         .{ .name = "sprites-v2", .path = "examples/thermite/sprites_v2.zig", .deps = &.{"app"} },
         .{ .name = "hypercube", .path = "examples/thermite/hypercube.zig", .deps = &.{"thermite"} },
+        .{ .name = "hypercube-v2", .path = "examples/thermite/hypercube_v2.zig", .deps = &.{"app"} },
         .{ .name = "app-demo", .path = "examples/app_demo.zig", .deps = &.{"app"} },
     };
 
