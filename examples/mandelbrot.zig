@@ -112,7 +112,7 @@ pub const Model = struct {
 
 pub const Msg = union(enum) {
     tick: f32,
-    key: u8,
+    key: app.Key,
     resize: app.Size,
 };
 
@@ -159,8 +159,14 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
             }
         },
         .key => |k| {
-            if (k == 'q' or k == 3) return .quit;
-            if (k == ' ') model.is_paused = !model.is_paused;
+            switch (k) {
+                .char => |c| {
+                    if (c == 'q') return .quit;
+                    if (c == ' ') model.is_paused = !model.is_paused;
+                },
+                .ctrl_c => return .quit,
+                else => {},
+            }
         },
         .resize => |size| {
             model.canvas.resize(allocator, size.w, size.h) catch {};
@@ -169,9 +175,8 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
     return .none;
 }
 
-fn onKey(key: u8) Msg {
-    return .{ .key = key };
-}
+// Use wrap() to create key handler
+const onKey = app.wrap(Msg, .key);
 
 fn render(model: *Model) void {
     const width = model.canvas.width;

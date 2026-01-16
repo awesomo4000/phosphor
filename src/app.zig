@@ -9,6 +9,9 @@ pub const LayoutNode = phosphor.LayoutNode;
 pub const Rect = phosphor.Rect;
 pub const renderTree = phosphor.renderTree;
 
+// Re-export Key type for input handling
+pub const Key = thermite.terminal.Key;
+
 /// Backend selection for rendering
 pub const Backend = enum {
     simple,
@@ -281,7 +284,7 @@ pub fn Canvas(comptime Ctx: type) type {
 pub const Node = struct {
     data: Data,
     // Event handlers (type-erased, cast in App runtime)
-    on_key: ?*const anyopaque = null, // fn(u8) Msg
+    on_key: ?*const anyopaque = null, // fn(Key) Msg
     on_click: ?*const anyopaque = null, // fn() Msg
 
     pub const Data = union(enum) {
@@ -328,7 +331,7 @@ pub fn CanvasOptions(comptime Ctx: type, comptime Msg: type) type {
     return struct {
         buffer: *Canvas(Ctx),
         ctx: *Ctx,
-        on_key: ?*const fn (u8) Msg = null,
+        on_key: ?*const fn (Key) Msg = null,
         on_click: ?*const fn () Msg = null,
         on_mouse: ?*const fn (u16, u16) Msg = null, // x, y
         overlay_text: ?[]const u8 = null, // status bar text drawn at bottom
@@ -510,7 +513,7 @@ pub fn App(comptime Module: type) type {
                         .key => |key| {
                             // Check view tree for on_key handler first
                             if (findKeyHandler(root)) |handler| {
-                                const typed_handler: *const fn (u8) Msg = @ptrCast(@alignCast(handler));
+                                const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                                 const msg = typed_handler(key);
                                 if (executeCmd(Module.update(model, msg, allocator))) return;
                             } else if (msgFromEvent(Msg, event)) |msg| {
@@ -605,9 +608,9 @@ pub fn App(comptime Module: type) type {
                 // Input handling
                 if (subs.animation_frame) {
                     // Non-blocking key check when animating
-                    if (thermite.terminal.readKey(term_fd)) |key| {
+                    if (thermite.terminal.readKeyEvent(term_fd)) |key| {
                         if (findKeyHandler(root)) |handler| {
-                            const typed_handler: *const fn (u8) Msg = @ptrCast(@alignCast(handler));
+                            const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                             if (executeCmd(Module.update(model, typed_handler(key), allocator))) return;
                         } else if (@hasField(Msg, "key")) {
                             if (executeCmd(Module.update(model, @unionInit(Msg, "key", key), allocator))) return;
@@ -617,9 +620,9 @@ pub fn App(comptime Module: type) type {
                     // Blocking poll when not animating
                     switch (thermite.terminal.pollInput(term_fd, 100) catch .timeout) {
                         .ready => {
-                            if (thermite.terminal.readKey(term_fd)) |key| {
+                            if (thermite.terminal.readKeyEvent(term_fd)) |key| {
                                 if (findKeyHandler(root)) |handler| {
-                                    const typed_handler: *const fn (u8) Msg = @ptrCast(@alignCast(handler));
+                                    const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                                     if (executeCmd(Module.update(model, typed_handler(key), allocator))) return;
                                 } else if (@hasField(Msg, "key")) {
                                     if (executeCmd(Module.update(model, @unionInit(Msg, "key", key), allocator))) return;
@@ -953,7 +956,7 @@ const Terminal = struct {
     const TIOCGWINSZ = if (@import("builtin").os.tag == .macos) 0x40087468 else 0x5413;
 
     pub const Event = union(enum) {
-        key: u8,
+        key: Key,
         resize: struct { w: u32, h: u32 },
     };
 
@@ -1044,7 +1047,24 @@ const Terminal = struct {
         var buf: [1]u8 = undefined;
         const n = std.posix.read(self.fd, &buf) catch return null;
         if (n == 0) return null;
-        return .{ .key = buf[0] };
+        // Convert byte to Key (simple backend - no escape sequence parsing)
+        const key: Key = switch (buf[0]) {
+            1 => .ctrl_a,
+            3 => .ctrl_c,
+            4 => .ctrl_d,
+            5 => .ctrl_e,
+            11 => .ctrl_k,
+            12 => .ctrl_l,
+            15 => .ctrl_o,
+            21 => .ctrl_u,
+            23 => .ctrl_w,
+            9 => .tab,
+            10, 13 => .enter,
+            27 => .escape,
+            127 => .backspace,
+            else => if (buf[0] >= 32 and buf[0] < 127) .{ .char = buf[0] } else .unknown,
+        };
+        return .{ .key = key };
     }
 
     pub fn present(self: *const Terminal, screen: *ScreenBuffer) !void {

@@ -19,6 +19,9 @@ pub const blocks = @import("blocks.zig");
 pub const terminal = @import("terminal.zig");
 pub const Sprite = @import("sprite.zig").Sprite;
 
+// Input types (re-export for convenience)
+pub const Key = terminal.Key;
+
 // Terminal capabilities detection
 pub const capabilities = @import("capabilities.zig");
 pub const Capabilities = capabilities.Capabilities;

@@ -19,34 +19,8 @@ pub const Event = union(enum) {
     none,
 };
 
-pub const Key = union(enum) {
-    char: u21,
-    enter,
-    backspace,
-    delete,
-    tab,
-    escape,
-    up,
-    down,
-    left,
-    right,
-    home,
-    end,
-    ctrl_a,
-    ctrl_c,
-    ctrl_d,
-    ctrl_e,
-    ctrl_k,
-    ctrl_l,
-    ctrl_o,
-    ctrl_u,
-    ctrl_w,
-    ctrl_left,
-    ctrl_right,
-    shift_enter,
-    alt_enter,
-    unknown,
-};
+// Re-export Key from thermite (canonical definition)
+pub const Key = thermite.terminal.Key;
 
 pub const Size = struct {
     cols: u16,

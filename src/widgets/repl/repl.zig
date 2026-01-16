@@ -174,6 +174,10 @@ pub const Repl = struct {
             .unknown => {
                 return .none;
             },
+            // Unhandled keys (page up/down, F-keys, etc.)
+            else => {
+                return .none;
+            },
         }
     }
 

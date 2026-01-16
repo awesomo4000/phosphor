@@ -53,7 +53,7 @@ pub const Model = struct {
 
 pub const Msg = union(enum) {
     tick: f32,
-    key: u8,
+    key: app.Key,
     resize: app.Size,
 };
 
@@ -135,7 +135,11 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
             model.star_angle += 0.05;
         },
         .key => |k| {
-            if (k == 'q' or k == 3) return .quit;
+            switch (k) {
+                .char => |c| if (c == 'q') return .quit,
+                .ctrl_c => return .quit,
+                else => {},
+            }
         },
         .resize => |size| {
             model.canvas.resize(allocator, size.w, size.h) catch {};
@@ -149,9 +153,8 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
     return .none;
 }
 
-fn onKey(key: u8) Msg {
-    return .{ .key = key };
-}
+// Use wrap() to create key handler - no need for custom function
+const onKey = app.wrap(Msg, .key);
 
 fn render(model: *Model) void {
     const width = model.canvas.width;

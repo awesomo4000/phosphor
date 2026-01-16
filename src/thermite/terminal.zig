@@ -193,7 +193,7 @@ pub fn resetColors(fd: i32) !void {
     _ = try std.posix.write(fd, RESET_ALL);
 }
 
-/// Non-blocking read from terminal
+/// Non-blocking read from terminal (single byte - use readKeyEvent for escape sequences)
 pub fn readKey(fd: i32) ?u8 {
     // Set non-blocking mode temporarily
     const old_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return null;
@@ -207,6 +207,268 @@ pub fn readKey(fd: i32) ?u8 {
         return buf[0];
     }
     return null;
+}
+
+/// Key event type for terminal input
+pub const Key = union(enum) {
+    // Regular characters (letters, numbers, symbols)
+    char: u21,
+
+    // Special keys
+    enter,
+    backspace,
+    delete,
+    tab,
+    escape,
+    insert,
+
+    // Navigation
+    up,
+    down,
+    left,
+    right,
+    home,
+    end,
+    page_up,
+    page_down,
+
+    // Function keys (F1-F12)
+    f: u4,
+
+    // Control key combinations
+    ctrl_a,
+    ctrl_b,
+    ctrl_c,
+    ctrl_d,
+    ctrl_e,
+    ctrl_f,
+    ctrl_g,
+    ctrl_h,
+    ctrl_i,
+    ctrl_j,
+    ctrl_k,
+    ctrl_l,
+    ctrl_m,
+    ctrl_n,
+    ctrl_o,
+    ctrl_p,
+    ctrl_q,
+    ctrl_r,
+    ctrl_s,
+    ctrl_t,
+    ctrl_u,
+    ctrl_v,
+    ctrl_w,
+    ctrl_x,
+    ctrl_y,
+    ctrl_z,
+    ctrl_left,
+    ctrl_right,
+    ctrl_up,
+    ctrl_down,
+    ctrl_home,
+    ctrl_end,
+
+    // Alt key combinations
+    alt: u21, // Alt + any character
+    alt_enter,
+
+    // Shift combinations
+    shift_enter,
+    shift_tab,
+
+    unknown,
+};
+
+/// Read a key event, parsing escape sequences for arrow keys, etc.
+/// Returns null if no input available.
+pub fn readKeyEvent(fd: i32) ?Key {
+    // Set non-blocking mode temporarily
+    const old_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return null;
+    const O_NONBLOCK = if (@import("builtin").os.tag == .macos) @as(c_int, 0x0004) else std.posix.O.NONBLOCK;
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags | O_NONBLOCK) catch return null;
+    defer _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags) catch {};
+
+    var buf: [16]u8 = undefined;
+    var total: usize = 0;
+
+    // Read first byte
+    const n = std.posix.read(fd, buf[0..1]) catch return null;
+    if (n == 0) return null;
+    total = 1;
+
+    // If it's an escape, try to read more bytes for the sequence
+    if (buf[0] == 0x1b) {
+        // Small delay to allow escape sequence bytes to arrive
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+
+        // Try to read more bytes
+        const more = std.posix.read(fd, buf[1..]) catch 0;
+        total += more;
+    }
+
+    return parseKeySequence(buf[0..total]);
+}
+
+/// Parse a key sequence into a Key event
+fn parseKeySequence(seq: []const u8) ?Key {
+    if (seq.len == 0) return null;
+
+    const first = seq[0];
+
+    // Escape sequence
+    if (first == 0x1b) {
+        if (seq.len == 1) return .escape;
+
+        // CSI sequences: ESC [
+        if (seq.len >= 2 and seq[1] == '[') {
+            return parseCSISequence(seq[2..]);
+        }
+
+        // SS3 sequences: ESC O (used by some terminals for arrow keys/F keys)
+        if (seq.len >= 2 and seq[1] == 'O') {
+            if (seq.len >= 3) {
+                return switch (seq[2]) {
+                    'A' => .up,
+                    'B' => .down,
+                    'C' => .right,
+                    'D' => .left,
+                    'H' => .home,
+                    'F' => .end,
+                    'P' => .{ .f = 1 },
+                    'Q' => .{ .f = 2 },
+                    'R' => .{ .f = 3 },
+                    'S' => .{ .f = 4 },
+                    else => .escape,
+                };
+            }
+            return .escape;
+        }
+
+        // Alt+Enter: ESC followed by Enter
+        if (seq.len >= 2 and (seq[1] == 13 or seq[1] == 10)) {
+            return .alt_enter;
+        }
+
+        return .escape;
+    }
+
+    // Control characters
+    return switch (first) {
+        1 => .ctrl_a,
+        3 => .ctrl_c,
+        4 => .ctrl_d,
+        5 => .ctrl_e,
+        11 => .ctrl_k,
+        12 => .ctrl_l,
+        15 => .ctrl_o,
+        21 => .ctrl_u,
+        23 => .ctrl_w,
+        9 => .tab,
+        10, 13 => .enter,
+        127 => .backspace,
+        else => if (first >= 32 and first < 127) .{ .char = first } else .unknown,
+    };
+}
+
+/// Parse CSI sequence (after ESC [)
+fn parseCSISequence(seq: []const u8) Key {
+    if (seq.len == 0) return .escape;
+
+    // Simple arrow keys: ESC [ A/B/C/D
+    if (seq.len == 1) {
+        return switch (seq[0]) {
+            'A' => .up,
+            'B' => .down,
+            'C' => .right,
+            'D' => .left,
+            'H' => .home,
+            'F' => .end,
+            'Z' => .shift_tab,
+            else => .unknown,
+        };
+    }
+
+    // Modified keys: ESC [ 1 ; <mod> <key>
+    // mod: 2=shift, 3=alt, 4=shift+alt, 5=ctrl, 6=ctrl+shift, 7=ctrl+alt, 8=ctrl+shift+alt
+    if (seq.len >= 3 and seq[0] == '1' and seq[1] == ';') {
+        const modifier = seq[2];
+        if (seq.len >= 4) {
+            const key_char = seq[3];
+            // Ctrl modifier (5)
+            if (modifier == '5') {
+                return switch (key_char) {
+                    'A' => .ctrl_up,
+                    'B' => .ctrl_down,
+                    'C' => .ctrl_right,
+                    'D' => .ctrl_left,
+                    'H' => .ctrl_home,
+                    'F' => .ctrl_end,
+                    else => .unknown,
+                };
+            }
+            // Shift modifier (2) - just return base key for now
+            if (modifier == '2') {
+                return switch (key_char) {
+                    'A' => .up,
+                    'B' => .down,
+                    'C' => .right,
+                    'D' => .left,
+                    else => .unknown,
+                };
+            }
+            // Alt modifier (3) - treat as base key for now
+            if (modifier == '3') {
+                return switch (key_char) {
+                    'A' => .up,
+                    'B' => .down,
+                    'C' => .right,
+                    'D' => .left,
+                    else => .unknown,
+                };
+            }
+        }
+        return .unknown;
+    }
+
+    // Keypad/extended keys: ESC [ <num> ~
+    // 1~=Home, 2~=Insert, 3~=Delete, 4~=End, 5~=PgUp, 6~=PgDn
+    // 11~-15~ = F1-F5, 17~-21~ = F6-F10, 23~-24~ = F11-F12
+    if (seq.len >= 2 and seq[seq.len - 1] == '~') {
+        // Parse the number before ~
+        var num: u8 = 0;
+        for (seq[0 .. seq.len - 1]) |c| {
+            if (c >= '0' and c <= '9') {
+                num = num * 10 + (c - '0');
+            } else if (c == ';') {
+                // Modifier follows, ignore for now
+                break;
+            }
+        }
+        return switch (num) {
+            1 => .home,
+            2 => .insert,
+            3 => .delete,
+            4 => .end,
+            5 => .page_up,
+            6 => .page_down,
+            11 => .{ .f = 1 },
+            12 => .{ .f = 2 },
+            13 => .{ .f = 3 },
+            14 => .{ .f = 4 },
+            15 => .{ .f = 5 },
+            17 => .{ .f = 6 },
+            18 => .{ .f = 7 },
+            19 => .{ .f = 8 },
+            20 => .{ .f = 9 },
+            21 => .{ .f = 10 },
+            23 => .{ .f = 11 },
+            24 => .{ .f = 12 },
+            else => .unknown,
+        };
+    }
+
+    return .unknown;
 }
 
 // ============================================================================

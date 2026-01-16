@@ -18,9 +18,6 @@ const Repl = repl_mod.Repl;
 const logview_mod = @import("logview");
 const LogView = logview_mod.LogView;
 
-// Re-export Key from phosphor for widget compatibility
-const Key = phosphor.Key;
-
 // ─────────────────────────────────────────────────────────────
 // Model - all application state in one place
 // ─────────────────────────────────────────────────────────────
@@ -81,7 +78,7 @@ pub fn init(allocator: std.mem.Allocator) Model {
 
 const Msg = union(enum) {
     // System events
-    key: u8,
+    key: app.Key,
     resize: Size,
     tick: f32,
 
@@ -121,9 +118,8 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
         .resize => |new_size| {
             model.size = new_size;
         },
-        .key => |key_byte| {
-            // Route key to repl widget, map response to our Msg type
-            const key = keyByteToKey(key_byte);
+        .key => |key| {
+            // Route key directly to repl widget (app.Key and phosphor.Key are same type)
             if (model.repl.update(.{ .key = key }) catch null) |repl_msg| {
                 if (repl_msg_map.map(repl_msg)) |mapped| {
                     // Recursively handle the mapped message
@@ -154,25 +150,6 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
         return .quit;
     }
     return .none;
-}
-
-fn keyByteToKey(byte: u8) Key {
-    return switch (byte) {
-        1 => .ctrl_a,
-        3 => .ctrl_c,
-        4 => .ctrl_d,
-        5 => .ctrl_e,
-        11 => .ctrl_k,
-        12 => .ctrl_l,
-        15 => .ctrl_o,
-        21 => .ctrl_u,
-        23 => .ctrl_w,
-        9 => .tab,
-        10, 13 => .enter,
-        27 => .escape,
-        127 => .backspace,
-        else => if (byte >= 32 and byte < 127) .{ .char = byte } else .unknown,
-    };
 }
 
 fn handleCommand(model: *Model, text: []const u8) !void {
