@@ -36,6 +36,141 @@ pub const Size = struct {
     h: u32,
 };
 
+/// Create a function that wraps a value into a tagged union variant.
+/// This enables Elm-style child-to-parent message passing.
+///
+/// Example:
+/// ```zig
+/// const Msg = union(enum) {
+///     got_submit: []const u8,
+///     got_change: []const u8,
+///     tick: f32,
+/// };
+///
+/// // Create wrapper functions
+/// const on_submit = wrap(Msg, .got_submit);  // fn([]const u8) Msg
+/// const on_change = wrap(Msg, .got_change);  // fn([]const u8) Msg
+///
+/// // Use in widget configuration
+/// repl(&model.repl_state, .{
+///     .on_submit = on_submit,
+///     .on_change = on_change,
+/// });
+/// ```
+pub fn wrap(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) WrapFn(Msg, tag) {
+    const Payload = std.meta.TagPayload(Msg, tag);
+    return struct {
+        fn f(payload: Payload) Msg {
+            return @unionInit(Msg, @tagName(tag), payload);
+        }
+    }.f;
+}
+
+/// Return type for wrap() - a function from payload to message
+fn WrapFn(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) type {
+    const Payload = std.meta.TagPayload(Msg, tag);
+    return *const fn (Payload) Msg;
+}
+
+/// Create a function that transforms a value before wrapping into a tagged union.
+/// Use this when you need to add extra context or transform the payload.
+///
+/// Example:
+/// ```zig
+/// const Msg = union(enum) {
+///     key_event: struct { key: u8, source: []const u8 },
+/// };
+///
+/// // Transform u8 key into struct with extra context
+/// const on_key = wrapWith(Msg, .key_event, struct {
+///     fn f(key: u8) struct { key: u8, source: []const u8 } {
+///         return .{ .key = key, .source = "repl" };
+///     }
+/// }.f);
+/// ```
+pub fn wrapWith(
+    comptime Msg: type,
+    comptime tag: std.meta.Tag(Msg),
+    comptime transformer: anytype,
+) WrapWithFn(@TypeOf(transformer), Msg) {
+    const TransformFn = @TypeOf(transformer);
+    const Input = @typeInfo(TransformFn).@"fn".params[0].type.?;
+
+    return struct {
+        fn f(input: Input) Msg {
+            const payload = transformer(input);
+            return @unionInit(Msg, @tagName(tag), payload);
+        }
+    }.f;
+}
+
+/// Return type for wrapWith()
+fn WrapWithFn(comptime TransformFn: type, comptime Msg: type) type {
+    const Input = @typeInfo(TransformFn).@"fn".params[0].type.?;
+    return *const fn (Input) Msg;
+}
+
+/// Configuration for mapping child widget messages to parent messages.
+/// Use with `mapChildMsg` to translate widget events to your app's Msg type.
+///
+/// Example:
+/// ```zig
+/// const MsgMap = app.MsgMapper(Msg, Repl.ReplMsg){
+///     .submitted = wrap(Msg, .got_submit),
+///     .cancelled = wrapVoid(Msg, .cancelled),
+///     .eof = wrapVoid(Msg, .quit),
+/// };
+///
+/// if (model.repl.update(event) catch null) |child_msg| {
+///     if (MsgMap.map(child_msg)) |msg| {
+///         // Handle msg...
+///     }
+/// }
+/// ```
+pub fn MsgMapper(comptime ParentMsg: type, comptime ChildMsg: type) type {
+    const child_fields = @typeInfo(ChildMsg).@"union".fields;
+
+    // Build struct fields for each child message variant
+    var fields: [child_fields.len]std.builtin.Type.StructField = undefined;
+    for (child_fields, 0..) |field, i| {
+        const MapperFn = if (field.type == void)
+            ?*const fn () ParentMsg
+        else
+            ?*const fn (field.type) ParentMsg;
+
+        fields[i] = .{
+            .name = field.name,
+            .type = MapperFn,
+            .default_value_ptr = @ptrCast(&@as(MapperFn, null)),
+            .is_comptime = false,
+            .alignment = @alignOf(MapperFn),
+        };
+    }
+
+    return @Type(.{ .@"struct" = .{
+        .layout = .auto,
+        .fields = &fields,
+        .decls = &.{},
+        .is_tuple = false,
+    } });
+}
+
+/// Wrap a void variant - creates a function that takes nothing and returns the message.
+/// Use for child message variants that have no payload (like .cancelled, .eof).
+///
+/// Example:
+/// ```zig
+/// const Msg = union(enum) { quit, cancelled };
+/// const on_eof = wrapVoid(Msg, .quit);  // fn() Msg
+/// ```
+pub fn wrapVoid(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) *const fn () Msg {
+    return struct {
+        fn f() Msg {
+            return @unionInit(Msg, @tagName(tag), {});
+        }
+    }.f;
+}
+
 /// Commands - side effects returned from update
 pub const Cmd = union(enum) {
     /// No side effect

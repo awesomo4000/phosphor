@@ -80,9 +80,35 @@ pub fn init(allocator: std.mem.Allocator) Model {
 // ─────────────────────────────────────────────────────────────
 
 const Msg = union(enum) {
+    // System events
     key: u8,
     resize: Size,
     tick: f32,
+
+    // Repl widget events (mapped from Repl.ReplMsg)
+    got_submit: []const u8,
+    got_cancel,
+    got_eof,
+    got_clear_screen,
+};
+
+// Message mappers using wrap() - declarative child-to-parent message translation
+const repl_msg_map = struct {
+    const submitted = app.wrap(Msg, .got_submit);
+    const cancelled = app.wrapVoid(Msg, .got_cancel);
+    const eof = app.wrapVoid(Msg, .got_eof);
+    const clear_screen = app.wrapVoid(Msg, .got_clear_screen);
+
+    /// Map a ReplMsg to our Msg type
+    fn map(repl_msg: Repl.ReplMsg) ?Msg {
+        return switch (repl_msg) {
+            .submitted => |text| submitted(text),
+            .cancelled => cancelled(),
+            .eof => eof(),
+            .clear_screen => clear_screen(),
+            .text_changed => null, // Ignore text changes
+        };
+    }
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -90,22 +116,38 @@ const Msg = union(enum) {
 // ─────────────────────────────────────────────────────────────
 
 pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
-    _ = allocator;
-
     switch (msg) {
+        // System events
         .resize => |new_size| {
             model.size = new_size;
         },
         .key => |key_byte| {
-            // Convert key byte to phosphor Key and route to repl widget
+            // Route key to repl widget, map response to our Msg type
             const key = keyByteToKey(key_byte);
-            const widget_event = Repl.Event{ .key = key };
-
-            if (model.repl.update(widget_event) catch null) |repl_msg| {
-                handleReplMsg(model, repl_msg) catch {};
+            if (model.repl.update(.{ .key = key }) catch null) |repl_msg| {
+                if (repl_msg_map.map(repl_msg)) |mapped| {
+                    // Recursively handle the mapped message
+                    return update(model, mapped, allocator);
+                }
             }
         },
         .tick => {},
+
+        // Repl widget events (mapped from ReplMsg via wrap())
+        .got_submit => |text| {
+            echoToLog(&model.log, text, model.repl.getPrompt()) catch {};
+            handleCommand(model, text) catch {};
+            model.repl.finalizeSubmit() catch {};
+        },
+        .got_cancel => {
+            model.repl.cancel();
+        },
+        .got_eof => {
+            model.running = false;
+        },
+        .got_clear_screen => {
+            model.log.clear();
+        },
     }
 
     if (!model.running) {
@@ -131,26 +173,6 @@ fn keyByteToKey(byte: u8) Key {
         127 => .backspace,
         else => if (byte >= 32 and byte < 127) .{ .char = byte } else .unknown,
     };
-}
-
-fn handleReplMsg(model: *Model, repl_msg: Repl.ReplMsg) !void {
-    switch (repl_msg) {
-        .submitted => |text| {
-            try echoToLog(&model.log, text, model.repl.getPrompt());
-            try handleCommand(model, text);
-            try model.repl.finalizeSubmit();
-        },
-        .cancelled => {
-            model.repl.cancel();
-        },
-        .eof => {
-            model.running = false;
-        },
-        .clear_screen => {
-            model.log.clear();
-        },
-        .text_changed => {},
-    }
 }
 
 fn handleCommand(model: *Model, text: []const u8) !void {
