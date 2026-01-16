@@ -25,6 +25,12 @@ fn utf8BytesForColumns(str: []const u8, max_cols: u16) usize {
     return bytes;
 }
 
+/// Size without position (for widgets that draw in local coords)
+pub const Size = struct {
+    w: u16,
+    h: u16,
+};
+
 /// Rectangle bounds for layout
 pub const Rect = struct {
     x: u16,
@@ -38,6 +44,10 @@ pub const Rect = struct {
 
     pub fn bottom(self: Rect) u16 {
         return self.y + self.h;
+    }
+
+    pub fn size(self: Rect) Size {
+        return .{ .w = self.w, .h = self.h };
     }
 };
 
@@ -122,6 +132,42 @@ pub const WidgetVTable = struct {
     }
 };
 
+/// Interface for widgets that draw in local coordinates (0,0 origin).
+/// The layout system will translate commands to final screen position.
+/// This is the preferred pattern for new widgets.
+pub const LocalWidgetVTable = struct {
+    ptr: *anyopaque,
+
+    /// Given available width, what height does this widget prefer?
+    getPreferredHeightFn: ?*const fn (ptr: *anyopaque, width: u16) u16 = null,
+
+    /// What width does this widget prefer?
+    getPreferredWidthFn: ?*const fn (ptr: *anyopaque) u16 = null,
+
+    /// Render the widget using local coordinates (0,0 is top-left of widget).
+    /// Widget only needs to know its SIZE, not its position.
+    /// Layout will translate all coordinates to final screen position.
+    viewFn: *const fn (ptr: *anyopaque, size: Size, allocator: Allocator) anyerror![]DrawCommand,
+
+    pub fn getPreferredHeight(self: LocalWidgetVTable, width: u16) u16 {
+        if (self.getPreferredHeightFn) |f| {
+            return f(self.ptr, width);
+        }
+        return 1;
+    }
+
+    pub fn getPreferredWidth(self: LocalWidgetVTable) u16 {
+        if (self.getPreferredWidthFn) |f| {
+            return f(self.ptr);
+        }
+        return 1;
+    }
+
+    pub fn view(self: LocalWidgetVTable, size: Size, allocator: Allocator) ![]DrawCommand {
+        return self.viewFn(self.ptr, size, allocator);
+    }
+};
+
 /// A node in the layout tree
 pub const LayoutNode = struct {
     /// How this node sizes within its parent
@@ -140,8 +186,11 @@ pub const LayoutNode = struct {
     content: Content,
 
     pub const Content = union(enum) {
-        /// Leaf node with a widget (legacy vtable approach)
+        /// Leaf node with a widget (legacy vtable approach - widget positions itself)
         widget: WidgetVTable,
+
+        /// Leaf node with a local widget (new approach - draws at 0,0, layout translates)
+        local_widget: LocalWidgetVTable,
 
         /// Branch node with children
         children: []const LayoutNode,
@@ -169,14 +218,24 @@ pub const LayoutNode = struct {
         };
     };
 
-    /// Create a leaf node from a widget
+    /// Create a leaf node from a widget (legacy - widget positions itself)
     pub fn leaf(widget: WidgetVTable) LayoutNode {
         return .{ .content = .{ .widget = widget } };
     }
 
-    /// Create a leaf node with sizing
+    /// Create a leaf node with sizing (legacy)
     pub fn leafSized(widget: WidgetVTable, sizing: Sizing) LayoutNode {
         return .{ .sizing = sizing, .content = .{ .widget = widget } };
+    }
+
+    /// Create a leaf node from a local widget (new - draws at 0,0, layout translates)
+    pub fn localWidget(widget: LocalWidgetVTable) LayoutNode {
+        return .{ .content = .{ .local_widget = widget } };
+    }
+
+    /// Create a local widget leaf with sizing
+    pub fn localWidgetSized(widget: LocalWidgetVTable, sizing: Sizing) LayoutNode {
+        return .{ .sizing = sizing, .content = .{ .local_widget = widget } };
     }
 
     /// Create a branch node with children
@@ -222,6 +281,36 @@ pub const LayoutNode = struct {
     }
 };
 
+/// Translate all position-related commands by an offset.
+/// Used to convert local widget coordinates to screen coordinates.
+fn translateCommands(commands: []DrawCommand, offset_x: u16, offset_y: u16) void {
+    for (commands) |*cmd| {
+        switch (cmd.*) {
+            .move_cursor => |*pos| {
+                pos.x += offset_x;
+                pos.y += offset_y;
+            },
+            .draw_box => |*box| {
+                box.x += offset_x;
+                box.y += offset_y;
+            },
+            .draw_line => |*line| {
+                line.x += offset_x;
+                line.y += offset_y;
+            },
+            // These commands don't have positions
+            .draw_text,
+            .set_color,
+            .reset_attributes,
+            .clear_screen,
+            .clear_line,
+            .flush,
+            .show_cursor,
+            => {},
+        }
+    }
+}
+
 /// Calculate layout and render the tree
 pub fn renderTree(
     node: *const LayoutNode,
@@ -252,9 +341,17 @@ fn renderNode(
 
     switch (node.content) {
         .widget => |widget| {
-            // Leaf: render the widget (legacy vtable approach)
+            // Leaf: render the widget (legacy vtable approach - widget positions itself)
             const widget_commands = try widget.view(content_bounds, allocator);
             defer allocator.free(widget_commands);
+            try commands.appendSlice(allocator, widget_commands);
+        },
+        .local_widget => |widget| {
+            // Leaf: render the widget with local coords, then translate to screen position
+            const widget_commands = try widget.view(content_bounds.size(), allocator);
+            defer allocator.free(widget_commands);
+            // Translate local (0,0) coords to actual screen position
+            translateCommands(widget_commands, content_bounds.x, content_bounds.y);
             try commands.appendSlice(allocator, widget_commands);
         },
         .children => |children| {
@@ -419,6 +516,14 @@ fn getPreferredSize(node: *const LayoutNode, available: Rect, is_vertical: bool)
                 return widget.getPreferredWidth();
             }
         },
+        .local_widget => |widget| {
+            // Same logic for local widgets
+            if (is_vertical) {
+                return widget.getPreferredHeight(available.w);
+            } else {
+                return widget.getPreferredWidth();
+            }
+        },
         .children => |children| {
             // Sum children's preferred sizes
             var total: u16 = 0;
@@ -485,6 +590,46 @@ pub const Text = struct {
 pub const Spacer = struct {
     pub fn node() LayoutNode {
         return .{ .sizing = .{ .w = .{ .grow = .{} }, .h = .{ .grow = .{} } }, .content = .empty };
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
+// LocalText Widget (new pattern - draws at 0,0)
+// ─────────────────────────────────────────────────────────────
+
+/// A text widget using the new local coordinates pattern.
+/// The widget draws at (0,0) and layout translates to final position.
+pub const LocalText = struct {
+    text: []const u8,
+
+    pub fn init(text: []const u8) LocalText {
+        return .{ .text = text };
+    }
+
+    /// Get a LocalWidgetVTable for use with LayoutNode.localWidget()
+    pub fn localWidget(self: *const LocalText) LocalWidgetVTable {
+        return .{
+            .ptr = @constCast(@ptrCast(self)),
+            .getPreferredWidthFn = getPreferredWidth,
+            .viewFn = view,
+        };
+    }
+
+    fn getPreferredWidth(ptr: *anyopaque) u16 {
+        const self: *const LocalText = @ptrCast(@alignCast(ptr));
+        return @intCast(self.text.len);
+    }
+
+    /// Render at local coordinates (0,0). Layout will translate to screen position.
+    fn view(ptr: *anyopaque, size: Size, allocator: Allocator) ![]DrawCommand {
+        const self: *const LocalText = @ptrCast(@alignCast(ptr));
+        var commands = try allocator.alloc(DrawCommand, 2);
+        // Draw at (0,0) - layout will translate
+        commands[0] = .{ .move_cursor = .{ .x = 0, .y = 0 } };
+        // Truncate to fit size (UTF-8 aware)
+        const display_bytes = utf8BytesForColumns(self.text, size.w);
+        commands[1] = .{ .draw_text = .{ .text = self.text[0..display_bytes] } };
+        return commands;
     }
 };
 
@@ -609,4 +754,65 @@ test "horizontal layout" {
     // Content: grows to fill (80 - 20 = 60)
     try std.testing.expectEqual(@as(u16, 20), child_bounds[1].x);
     try std.testing.expectEqual(@as(u16, 60), child_bounds[1].w);
+}
+
+test "local widget coordinates are translated" {
+    const allocator = std.testing.allocator;
+
+    // Create a LocalText widget
+    const local_text = LocalText.init("Hello");
+
+    // Create layout with the local widget at y=5
+    const layout = LayoutNode{
+        .direction = .vertical,
+        .content = .{ .children = &[_]LayoutNode{
+            .{ .sizing = .{ .h = .{ .fixed = 5 } }, .content = .empty }, // Spacer at top
+            LayoutNode.localWidget(local_text.localWidget()), // LocalText at y=5
+        } },
+    };
+
+    // Render at position (10, 0) in an 80x24 area
+    const bounds = Rect{ .x = 10, .y = 0, .w = 80, .h = 24 };
+    const commands = try renderTree(&layout, bounds, allocator);
+    defer allocator.free(commands);
+
+    // Find the move_cursor command - should be translated to (10, 5)
+    var found_cursor = false;
+    for (commands) |cmd| {
+        switch (cmd) {
+            .move_cursor => |pos| {
+                try std.testing.expectEqual(@as(u16, 10), pos.x); // x offset applied
+                try std.testing.expectEqual(@as(u16, 5), pos.y); // y = 0 + 5 (spacer height)
+                found_cursor = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_cursor);
+}
+
+test "translateCommands offsets positions correctly" {
+    var commands = [_]DrawCommand{
+        .{ .move_cursor = .{ .x = 0, .y = 0 } },
+        .{ .draw_box = .{ .x = 5, .y = 5, .width = 10, .height = 10, .style = .square } },
+        .{ .draw_line = .{ .x = 0, .y = 0, .length = 5, .direction = .horizontal, .style = .single } },
+        .{ .draw_text = .{ .text = "hello" } }, // Should be unchanged
+    };
+
+    translateCommands(&commands, 10, 20);
+
+    // Check move_cursor was translated
+    try std.testing.expectEqual(@as(u16, 10), commands[0].move_cursor.x);
+    try std.testing.expectEqual(@as(u16, 20), commands[0].move_cursor.y);
+
+    // Check draw_box was translated
+    try std.testing.expectEqual(@as(u16, 15), commands[1].draw_box.x);
+    try std.testing.expectEqual(@as(u16, 25), commands[1].draw_box.y);
+
+    // Check draw_line was translated
+    try std.testing.expectEqual(@as(u16, 10), commands[2].draw_line.x);
+    try std.testing.expectEqual(@as(u16, 20), commands[2].draw_line.y);
+
+    // Check draw_text is unchanged (no position)
+    try std.testing.expectEqualStrings("hello", commands[3].draw_text.text);
 }
