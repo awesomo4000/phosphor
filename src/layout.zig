@@ -51,6 +51,18 @@ pub const Rect = struct {
     }
 };
 
+/// Widget position entry - maps widget pointer to screen position
+pub const WidgetPosition = struct {
+    widget_ptr: *anyopaque,
+    bounds: Rect,
+};
+
+/// Result of rendering a layout tree
+pub const RenderResult = struct {
+    commands: []DrawCommand,
+    widget_positions: []WidgetPosition,
+};
+
 /// Layout direction
 pub const Direction = enum {
     horizontal,
@@ -320,9 +332,33 @@ pub fn renderTree(
     var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
     errdefer commands.deinit(allocator);
 
-    try renderNode(node, bounds, allocator, &commands);
+    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .{};
+    defer widget_positions.deinit(allocator); // Not returned in legacy API
+
+    try renderNode(node, bounds, allocator, &commands, &widget_positions);
 
     return commands.toOwnedSlice(allocator);
+}
+
+/// Calculate layout and render the tree, also returning widget positions.
+/// Use this when you need to resolve Effect.after.set_cursor positions.
+pub fn renderTreeWithPositions(
+    node: *const LayoutNode,
+    bounds: Rect,
+    allocator: Allocator,
+) !RenderResult {
+    var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+    errdefer commands.deinit(allocator);
+
+    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .{};
+    errdefer widget_positions.deinit(allocator);
+
+    try renderNode(node, bounds, allocator, &commands, &widget_positions);
+
+    return .{
+        .commands = try commands.toOwnedSlice(allocator),
+        .widget_positions = try widget_positions.toOwnedSlice(allocator),
+    };
 }
 
 fn renderNode(
@@ -330,6 +366,7 @@ fn renderNode(
     bounds: Rect,
     allocator: Allocator,
     commands: *std.ArrayListUnmanaged(DrawCommand),
+    widget_positions: *std.ArrayListUnmanaged(WidgetPosition),
 ) !void {
     // Apply padding to get content area
     const content_bounds = Rect{
@@ -342,12 +379,22 @@ fn renderNode(
     switch (node.content) {
         .widget => |widget| {
             // Leaf: render the widget (legacy vtable approach - widget positions itself)
+            // Track widget position for Effect.after.set_cursor resolution
+            try widget_positions.append(allocator, .{
+                .widget_ptr = widget.ptr,
+                .bounds = content_bounds,
+            });
             const widget_commands = try widget.view(content_bounds, allocator);
             defer allocator.free(widget_commands);
             try commands.appendSlice(allocator, widget_commands);
         },
         .local_widget => |widget| {
             // Leaf: render the widget with local coords, then translate to screen position
+            // Track widget position for Effect.after.set_cursor resolution
+            try widget_positions.append(allocator, .{
+                .widget_ptr = widget.ptr,
+                .bounds = content_bounds,
+            });
             const widget_commands = try widget.view(content_bounds.size(), allocator);
             defer allocator.free(widget_commands);
             // Translate local (0,0) coords to actual screen position
@@ -360,7 +407,7 @@ fn renderNode(
             defer allocator.free(child_bounds);
 
             for (children, child_bounds) |*child, cb| {
-                try renderNode(child, cb, allocator, commands);
+                try renderNode(child, cb, allocator, commands, widget_positions);
             }
         },
         .empty => {},
@@ -391,7 +438,7 @@ fn renderNode(
                     .bg = if (style.bg) |bg| colorFromU32(bg) else null,
                 } });
             }
-            try renderNode(style.child, content_bounds, allocator, commands);
+            try renderNode(style.child, content_bounds, allocator, commands, widget_positions);
             if (style.fg != null or style.bg != null) {
                 try commands.append(allocator, .reset_attributes);
             }

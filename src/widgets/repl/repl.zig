@@ -5,6 +5,8 @@ const phosphor = @import("phosphor");
 const DrawCommand = phosphor.DrawCommand;
 const Key = phosphor.Key;
 const LayoutNode = phosphor.LayoutNode;
+const LocalWidgetVTable = phosphor.LocalWidgetVTable;
+const LayoutSize = phosphor.LayoutSize;
 const Sub = phosphor.Sub;
 
 /// Segment kind - distinguishes typed input from pasted content
@@ -412,6 +414,108 @@ pub const Repl = struct {
             .eof => .eof,
             .clear_screen => .clear_screen,
         };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Effect-based API (Lustre-style)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Configuration for mapping Repl events to app messages
+    /// Pass message constructors for each event type you want to handle
+    pub fn MsgConfig(comptime Msg: type) type {
+        return struct {
+            on_submit: *const fn ([]const u8) Msg,
+            on_cancel: Msg,
+            on_eof: Msg,
+            on_clear_screen: ?Msg = null,
+        };
+    }
+
+    /// Handle a key event, returning Effect(Msg) for the runtime
+    /// This is the new Effect-based API - returns effects instead of ?ReplMsg
+    ///
+    /// Note: Cursor positioning is handled by the view function (via layoutWithCursor
+    /// or Effect.after.set_cursor resolved by the runtime). This function focuses on
+    /// dispatching messages for semantic actions.
+    pub fn handleKeyEffect(self: *Repl, key: Key, comptime Msg: type, config: MsgConfig(Msg)) !phosphor.Effect(Msg) {
+        const action = try self.handleKey(key);
+
+        return switch (action) {
+            .none, .redraw => .none,
+            .submit => blk: {
+                const text = self.buffer.getTextSlice() orelse "";
+                // Add to history and clear buffer
+                if (text.len > 0) {
+                    try self.history.add(text);
+                }
+                self.buffer.clear();
+                self.history.resetNavigation();
+                break :blk .{ .dispatch = config.on_submit(text) };
+            },
+            .cancel => .{ .dispatch = config.on_cancel },
+            .eof => .{ .dispatch = config.on_eof },
+            .clear_screen => if (config.on_clear_screen) |msg|
+                .{ .dispatch = msg }
+            else
+                .none,
+        };
+    }
+
+    /// Get cursor position (x, y) relative to widget origin
+    pub fn getCursorPosition(self: *const Repl) struct { x: u16, y: u16 } {
+        const prompt_len: u16 = @intCast(self.config.prompt.len);
+        const cursor: u16 = @intCast(@min(self.buffer.cursor(), 1000));
+        return .{
+            .x = prompt_len + cursor,
+            .y = 0, // Single line for now, multi-line would calculate row
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // LocalWidget interface (for layout system integration)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Returns a LocalWidgetVTable for use with the layout system.
+    /// The layout system will track this widget's position, enabling
+    /// Effect.after.set_cursor to resolve absolute screen coordinates.
+    pub fn localWidget(self: *Repl) LocalWidgetVTable {
+        return .{
+            .ptr = self,
+            .getPreferredHeightFn = localWidgetGetHeight,
+            .getPreferredWidthFn = null, // Repl grows to fill width
+            .viewFn = localWidgetView,
+        };
+    }
+
+    fn localWidgetGetHeight(ptr: *anyopaque, _: u16) u16 {
+        const self: *Repl = @ptrCast(@alignCast(ptr));
+        // For now, single-line REPL is 1 row high
+        // TODO: Calculate actual height based on wrapped text
+        _ = self;
+        return 1;
+    }
+
+    fn localWidgetView(ptr: *anyopaque, size: LayoutSize, allocator: Allocator) anyerror![]DrawCommand {
+        const self: *Repl = @ptrCast(@alignCast(ptr));
+
+        var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+        errdefer commands.deinit(allocator);
+
+        // Move to local origin (0, 0) - layout will translate to screen position
+        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
+
+        // Render prompt + text
+        const prompt = self.config.prompt;
+        const text = self.buffer.getTextSlice() orelse "";
+
+        // Combine prompt and text
+        const full_line = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prompt, text });
+
+        // Truncate to width
+        const display_len = @min(full_line.len, size.w);
+        try commands.append(allocator, .{ .draw_text = .{ .text = full_line[0..display_len] } });
+
+        return commands.toOwnedSlice(allocator);
     }
 
     // ─────────────────────────────────────────────────────────────

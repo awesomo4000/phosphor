@@ -33,6 +33,14 @@ pub const application = @import("application.zig");
 pub const Application = application.Application;
 pub const Sub = application.Sub;
 
+// Effect system (Lustre-inspired)
+pub const effect = @import("effect.zig");
+pub const Effect = effect.Effect;
+
+// Subscriptions
+pub const subs_mod = @import("subs.zig");
+pub const Subs = subs_mod.Subs;
+
 // Layout system (flexbox-style)
 pub const layout = @import("layout.zig");
 pub const LayoutNode = layout.LayoutNode;
@@ -45,6 +53,9 @@ pub const Direction = layout.Direction;
 pub const WidgetVTable = layout.WidgetVTable;
 pub const LocalWidgetVTable = layout.LocalWidgetVTable; // New: widgets draw at (0,0)
 pub const renderTree = layout.renderTree;
+pub const renderTreeWithPositions = layout.renderTreeWithPositions; // For Effect.after.set_cursor
+pub const RenderResult = layout.RenderResult;
+pub const WidgetPosition = layout.WidgetPosition;
 pub const Text = layout.Text;
 pub const LocalText = layout.LocalText; // New: example local widget
 pub const Spacer = layout.Spacer;

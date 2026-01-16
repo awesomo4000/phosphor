@@ -90,6 +90,7 @@ pub fn build(b: *std.Build) void {
 
     const examples = [_]Example{
         .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview", "keytester" } },
+        .{ .name = "effect-demo", .path = "examples/effect_demo.zig", .deps = &.{ "app", "phosphor", "repl" } },
         // App architecture demos (Elm-style)
         .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },

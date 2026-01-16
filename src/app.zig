@@ -8,6 +8,9 @@ pub const DrawCommand = phosphor.DrawCommand;
 pub const LayoutNode = phosphor.LayoutNode;
 pub const Rect = phosphor.Rect;
 pub const renderTree = phosphor.renderTree;
+pub const renderTreeWithPositions = phosphor.renderTreeWithPositions;
+pub const RenderResult = phosphor.RenderResult;
+pub const WidgetPosition = phosphor.WidgetPosition;
 
 // Re-export Key type for input handling
 pub const Key = thermite.terminal.Key;
@@ -25,7 +28,11 @@ pub const RunOptions = struct {
     target_fps: u32 = 120,
 };
 
-/// Subscriptions - what events the app wants
+/// New Subs type - parameterized by Msg, wraps events in messages
+pub const SubsNew = phosphor.Subs;
+
+/// Legacy Subscriptions - what events the app wants
+/// TODO: Migrate to SubsNew after updating all apps
 pub const Subs = struct {
     keyboard: bool = false,
     mouse: bool = false,
@@ -174,7 +181,12 @@ pub fn wrapVoid(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) *const fn (
     }.f;
 }
 
-/// Commands - side effects returned from update
+/// Effect - declarative side effects returned from update
+/// Re-exported from phosphor, parameterized by Msg type
+pub const Effect = phosphor.Effect;
+
+/// Legacy Cmd alias for backwards compatibility
+/// TODO: Remove after migrating all apps to Effect
 pub const Cmd = union(enum) {
     /// No side effect
     none,
@@ -772,11 +784,15 @@ pub fn App(comptime Module: type) type {
                         .w = @intCast(renderer.term_width),
                         .h = @intCast(renderer.term_height),
                     };
-                    const commands = try renderTree(ref.node, bounds, frame_arena.allocator());
-                    executeDrawCommands(renderer, commands);
+
+                    // Use renderTreeWithPositions to track widget locations
+                    // This enables Effect.after.set_cursor to resolve absolute positions
+                    const render_result = try renderTreeWithPositions(ref.node, bounds, frame_arena.allocator());
+                    executeDrawCommands(renderer, render_result.commands);
                     try renderer.renderDifferential();
 
                     // Position and show cursor AFTER render
+                    // Legacy: use explicit cursor position from layoutWithCursor
                     if (ref.cursor_x) |cx| {
                         if (ref.cursor_y) |cy| {
                             var pos_buf: [32]u8 = undefined;
@@ -784,6 +800,10 @@ pub fn App(comptime Module: type) type {
                             _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
                         }
                     }
+
+                    // Store widget_positions for Effect.after.set_cursor resolution
+                    // (currently unused, but available for future Effect-based cursor handling)
+                    _ = render_result.widget_positions;
                 }
 
                 // Frame pacing
@@ -949,6 +969,75 @@ pub fn App(comptime Module: type) type {
                         if (executeCmd(c)) return true;
                     }
                     return false;
+                },
+            }
+        }
+
+        /// Result of processing an Effect
+        const EffectResult = struct {
+            should_quit: bool = false,
+            after_paint: ?Effect(Msg).AfterPaint = null,
+        };
+
+        /// Process an Effect, collecting dispatched messages and after-paint effects
+        fn processEffect(
+            effect: Effect(Msg),
+            model: *Model,
+            message_queue: *std.ArrayList(Msg),
+        ) EffectResult {
+            var result = EffectResult{};
+
+            switch (effect) {
+                .none => {},
+                .quit => {
+                    result.should_quit = true;
+                },
+                .dispatch => |msg| {
+                    // Queue message for processing
+                    message_queue.append(msg) catch {};
+                },
+                .after => |ap| {
+                    result.after_paint = ap;
+                },
+                .batch => |effects| {
+                    for (effects) |e| {
+                        const sub_result = processEffect(e, model, message_queue);
+                        if (sub_result.should_quit) result.should_quit = true;
+                        if (sub_result.after_paint) |ap| result.after_paint = ap;
+                    }
+                },
+            }
+
+            return result;
+        }
+
+        /// Execute after-paint effect (cursor positioning, etc.)
+        /// widget_positions is used to resolve Effect.set_cursor coordinates
+        fn executeAfterPaint(ap: Effect(Msg).AfterPaint, fd: i32, widget_positions: []const WidgetPosition) void {
+            switch (ap) {
+                .set_cursor => |c| {
+                    // Look up widget position from layout
+                    var abs_x: u16 = c.x;
+                    var abs_y: u16 = c.y;
+
+                    // Find widget in position map and add screen offset
+                    for (widget_positions) |wp| {
+                        if (wp.widget_ptr == c.widget) {
+                            abs_x = wp.bounds.x + c.x;
+                            abs_y = wp.bounds.y + c.y;
+                            break;
+                        }
+                    }
+
+                    var buf: [32]u8 = undefined;
+                    const seq = std.fmt.bufPrint(&buf, "\x1b[{};{}H\x1b[?25h", .{ abs_y + 1, abs_x + 1 }) catch return;
+                    _ = std.posix.write(fd, seq) catch {};
+                },
+                .show_cursor => {
+                    _ = std.posix.write(fd, "\x1b[?25h") catch {};
+                },
+                .hide_cursor => {
+                    _ = std.posix.write(fd, "\x1b[?25l") catch {};
                 },
             }
         }
