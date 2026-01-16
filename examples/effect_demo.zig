@@ -8,7 +8,6 @@
 ///
 const std = @import("std");
 const app = @import("app");
-const phosphor = @import("phosphor");
 
 // Re-exports
 const Effect = app.Effect;
@@ -20,6 +19,7 @@ const Key = app.Key;
 
 // Widgets
 const Repl = @import("repl").Repl;
+const LogView = @import("logview").LogView;
 
 // ─────────────────────────────────────────────────────────────
 // Model
@@ -27,27 +27,19 @@ const Repl = @import("repl").Repl;
 
 const Model = struct {
     repl: Repl,
-    output_lines: std.ArrayList([]const u8),
+    log: LogView,
     size: Size,
     allocator: std.mem.Allocator,
 
-    const welcome_text =
-        \\Effect Demo - Type commands and press Enter
-        \\Commands: echo <text>, quit
-        \\
-    ;
-
     pub fn create(allocator: std.mem.Allocator) !Model {
-        var output: std.ArrayList([]const u8) = .{};
-        // Static strings don't need freeing
-        var iter = std.mem.splitScalar(u8, welcome_text, '\n');
-        while (iter.next()) |line| {
-            try output.append(allocator, line);
-        }
+        var log = LogView.init(allocator, 1000);
+        log.append("Effect Demo - Type commands and press Enter") catch {};
+        log.append("Commands: echo <text>, quit") catch {};
+        log.append("") catch {};
 
         return .{
             .repl = try Repl.init(allocator, .{ .prompt = "effect> " }),
-            .output_lines = output,
+            .log = log,
             .size = .{ .w = 80, .h = 24 },
             .allocator = allocator,
         };
@@ -55,18 +47,7 @@ const Model = struct {
 
     pub fn deinit(self: *Model) void {
         self.repl.deinit();
-        // Free dynamically allocated strings (skip static welcome lines)
-        // Check pointer location, not content
-        const static_start: usize = @intFromPtr(welcome_text.ptr);
-        const static_end: usize = static_start + welcome_text.len;
-        for (self.output_lines.items) |line| {
-            const line_ptr: usize = @intFromPtr(line.ptr);
-            const is_static = line_ptr >= static_start and line_ptr < static_end;
-            if (!is_static and line.len > 0) {
-                self.allocator.free(line);
-            }
-        }
-        self.output_lines.deinit(self.allocator);
+        self.log.deinit();
     }
 };
 
@@ -122,8 +103,7 @@ pub fn update(model: *Model, msg: Msg, _: std.mem.Allocator) app.Cmd {
             return handleCommand(model, text);
         },
         .got_cancel => {
-            const cancel_line = model.allocator.dupe(u8, "^C") catch return .none;
-            model.output_lines.append(model.allocator, cancel_line) catch {};
+            model.log.append("^C") catch {};
         },
         .got_eof => {
             return .quit;
@@ -161,18 +141,15 @@ fn handleCommand(model: *Model, text: []const u8) app.Cmd {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
 
     // Echo the command
-    const prompt_line = std.fmt.allocPrint(model.allocator, "effect> {s}", .{trimmed}) catch return .none;
-    model.output_lines.append(model.allocator, prompt_line) catch {};
+    model.log.print("effect> {s}", .{trimmed}) catch {};
 
     if (std.mem.startsWith(u8, trimmed, "echo ")) {
         const echo_text = trimmed[5..];
-        const echo_line = std.fmt.allocPrint(model.allocator, "  {s}", .{echo_text}) catch return .none;
-        model.output_lines.append(model.allocator, echo_line) catch {};
+        model.log.print("  {s}", .{echo_text}) catch {};
     } else if (std.mem.eql(u8, trimmed, "quit")) {
         return .quit;
     } else if (trimmed.len > 0) {
-        const err_line = std.fmt.allocPrint(model.allocator, "Unknown: {s}", .{trimmed}) catch return .none;
-        model.output_lines.append(model.allocator, err_line) catch {};
+        model.log.print("Unknown: {s}", .{trimmed}) catch {};
     }
     return .none;
 }
@@ -182,46 +159,16 @@ fn handleCommand(model: *Model, text: []const u8) app.Cmd {
 // ─────────────────────────────────────────────────────────────
 
 pub fn view(model: *Model, ui: *Ui) *Node {
-    const cols: u16 = @intCast(model.size.w);
-    const rows: u16 = @intCast(model.size.h);
-
-    // Build output lines as layout nodes
-    const max_output_lines = rows -| 3; // Leave room for header + repl
-    const start_idx = if (model.output_lines.items.len > max_output_lines)
-        model.output_lines.items.len - max_output_lines
-    else
-        0;
-    const visible_lines = model.output_lines.items[start_idx..];
-
-    // Create children array: header + spacer + output lines + repl
-    var children = ui.ally.alloc(LayoutNode, visible_lines.len + 3) catch @panic("OOM");
-
-    // Header
-    children[0] = ui.ltext("Effect Demo (Effect-based architecture)");
-
-    // Separator
-    children[1] = ui.separator(cols);
-
-    // Output lines
-    for (visible_lines, 0..) |line, i| {
-        children[i + 2] = ui.ltext(line);
-    }
-
-    // Repl height is dynamic based on content
-    const repl_height = model.repl.calculateHeight(cols);
-    children[children.len - 1] = ui.widgetFixed(&model.repl, repl_height);
-
-    // Build layout tree
+    // Build the layout tree - widgets get their size from the layout system
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
-    root.* = ui.vbox(children);
+    root.* = ui.vbox(.{
+        ui.ltext("Effect Demo (Effect-based architecture)"),
+        ui.separator(),
+        ui.widgetGrow(&model.log),   // LogView grows to fill
+        ui.widget(&model.repl),       // Repl uses preferred height
+    });
 
-    // Cursor position: relative to repl start position
-    const cursor_pos = model.repl.getCursorPosition(cols);
-    const repl_start_y: u16 = 2 + @as(u16, @intCast(visible_lines.len));
-    const cursor_x = cursor_pos.x;
-    const cursor_y = repl_start_y + cursor_pos.y;
-
-    return ui.layoutWithCursor(root, cursor_x, cursor_y);
+    return ui.layout(root);
 }
 
 // ─────────────────────────────────────────────────────────────

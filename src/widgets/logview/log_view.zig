@@ -133,18 +133,32 @@ pub const LogView = struct {
     /// Render at local coordinates (0,0). Layout will translate.
     fn localView(ptr: *anyopaque, size: LayoutSize, alloc: Allocator) ![]DrawCommand {
         const self: *LogView = @ptrCast(@alignCast(ptr));
+
+        // Guard against degenerate sizes
+        if (size.w < 2 or size.h < 1) {
+            const commands = try alloc.alloc(DrawCommand, 0);
+            return commands;
+        }
+
         const visible = self.getVisibleLines(size.h);
 
         // Count commands needed: move+text for each row, accounting for wrapping
+        // But cap total rows to available height
         var total_rows: usize = 0;
         for (visible) |line| {
-            total_rows += countWrappedRows(line.text, size.w);
+            const line_rows = countWrappedRows(line.text, size.w);
+            total_rows += line_rows;
+            // Stop counting if we've exceeded available height
+            if (total_rows >= size.h) {
+                total_rows = size.h;
+                break;
+            }
         }
 
         // Each row needs: move_cursor + draw_text = 2 commands per row
-        // Plus clear lines for empty space at top
-        const empty_rows = size.h -| @as(u16, @intCast(total_rows));
-        const cmd_count = (empty_rows * 2) + (total_rows * 2);
+        const empty_rows: u16 = @intCast(size.h -| total_rows);
+        // Allocate for all rows: empty rows (clear) + content rows
+        const cmd_count = size.h * 2;
 
         var commands = try alloc.alloc(DrawCommand, cmd_count);
         var cmd_idx: usize = 0;
@@ -160,27 +174,28 @@ pub const LogView = struct {
         // Render visible lines with wrapping
         var row: u16 = empty_rows;
         for (visible) |line| {
+            // Stop if we've filled the view
+            if (row >= size.h) break;
+
             var remaining: []const u8 = line.text;
-            while (remaining.len > 0 or row == empty_rows + @as(u16, @intCast(total_rows)) - 1) {
-                const segment_len = @min(remaining.len, size.w);
-                commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = row } };
-                cmd_idx += 1;
-                if (segment_len > 0) {
-                    commands[cmd_idx] = .{ .draw_text = .{ .text = remaining[0..segment_len] } };
-                    remaining = remaining[segment_len..];
-                } else {
-                    commands[cmd_idx] = .{ .draw_text = .{ .text = "" } };
-                }
-                cmd_idx += 1;
-                row += 1;
-                if (remaining.len == 0) break;
-            }
             // Handle empty lines
-            if (line.text.len == 0 and row < size.h) {
+            if (remaining.len == 0) {
                 commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = row } };
                 cmd_idx += 1;
                 commands[cmd_idx] = .{ .draw_text = .{ .text = "" } };
                 cmd_idx += 1;
+                row += 1;
+                continue;
+            }
+
+            // Wrap text across multiple rows
+            while (remaining.len > 0 and row < size.h) {
+                const segment_len = @min(remaining.len, size.w);
+                commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = row } };
+                cmd_idx += 1;
+                commands[cmd_idx] = .{ .draw_text = .{ .text = remaining[0..segment_len] } };
+                cmd_idx += 1;
+                remaining = remaining[segment_len..];
                 row += 1;
             }
         }

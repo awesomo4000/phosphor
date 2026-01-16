@@ -60,6 +60,9 @@ pub const Text = layout.Text;
 pub const LocalText = layout.LocalText; // New: example local widget
 pub const Spacer = layout.Spacer;
 
+// Widgets
+pub const Separator = @import("widgets/separator.zig").Separator;
+
 // Terminal capabilities detection (re-exported from thermite)
 const thermite_mod = @import("thermite");
 pub const capabilities = thermite_mod.capabilities;

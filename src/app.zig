@@ -397,25 +397,17 @@ pub const Ui = struct {
         return LayoutNode.text(str);
     }
 
-    /// Create a horizontal separator line
-    pub fn separator(self: *Ui, width: u16) LayoutNode {
-        const sep = self.ally.alloc(u8, width * 3) catch @panic("OOM");
-        var idx: usize = 0;
-        for (0..width) |_| {
-            sep[idx] = 0xe2;     // UTF-8 for ─
-            sep[idx + 1] = 0x94;
-            sep[idx + 2] = 0x80;
-            idx += 3;
-        }
-        var node = LayoutNode.text(sep[0..idx]);
-        node.sizing.h = .{ .fixed = 1 };
-        return node;
+    /// Create a horizontal separator line (fills available width)
+    pub fn separator(_: *Ui) LayoutNode {
+        return phosphor.Separator.node();
     }
 
     /// Create a layout node from any widget with localWidget() method.
-    /// The widget receives its size from the layout system at render time.
+    /// Uses fit sizing for height (asks widget for preferred height).
     pub fn widget(_: *Ui, w: anytype) LayoutNode {
-        return LayoutNode.localWidget(w.localWidget());
+        var node = LayoutNode.localWidget(w.localWidget());
+        node.sizing.h = .{ .fit = .{} };  // Ask widget for preferred height
+        return node;
     }
 
     /// Create a widget node with explicit sizing
@@ -792,8 +784,13 @@ pub fn App(comptime Module: type) type {
                     try renderer.renderDifferential();
 
                     // Position and show cursor AFTER render
-                    // Legacy: use explicit cursor position from layoutWithCursor
-                    if (ref.cursor_x) |cx| {
+                    // First check for cursor from draw commands (widgets can emit show_cursor)
+                    if (findCursorInCommands(render_result.commands)) |cursor| {
+                        var pos_buf: [32]u8 = undefined;
+                        const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cursor.y + 1, cursor.x + 1 }) catch continue;
+                        _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                    } else if (ref.cursor_x) |cx| {
+                        // Legacy: use explicit cursor position from layoutWithCursor
                         if (ref.cursor_y) |cy| {
                             var pos_buf: [32]u8 = undefined;
                             const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cy + 1, cx + 1 }) catch continue;
@@ -1040,6 +1037,26 @@ pub fn App(comptime Module: type) type {
                     _ = std.posix.write(fd, "\x1b[?25l") catch {};
                 },
             }
+        }
+
+        const CursorPos = struct { x: u16, y: u16 };
+
+        /// Find cursor position from draw commands (look for show_cursor preceded by move_cursor)
+        fn findCursorInCommands(commands: []const DrawCommand) ?CursorPos {
+            var last_pos: ?CursorPos = null;
+            for (commands) |cmd| {
+                switch (cmd) {
+                    .move_cursor => |pos| {
+                        last_pos = .{ .x = pos.x, .y = pos.y };
+                    },
+                    .show_cursor => {
+                        // Found show_cursor - return the last move_cursor position
+                        return last_pos;
+                    },
+                    else => {},
+                }
+            }
+            return null;
         }
 
         /// Draw overlay text at bottom of terminal (status bar)

@@ -392,9 +392,13 @@ pub const Repl = struct {
     /// Get cursor position (x, y) relative to widget origin
     /// Requires width to calculate wrapping
     pub fn getCursorPosition(self: *const Repl, width: u16) struct { x: u16, y: u16 } {
+        const prompt_len: u16 = @intCast(self.config.prompt.len);
+
+        // Guard against degenerate widths
+        if (width < 10) return .{ .x = prompt_len, .y = 0 };
+
         const text = self.buffer.getTextSlice() orelse "";
         const cursor_pos = self.buffer.cursor();
-        const prompt_len: u16 = @intCast(self.config.prompt.len);
         const cont_len: u16 = 4; // "... "
         const wrap_len: u16 = 4; // "    "
 
@@ -486,6 +490,9 @@ pub const Repl = struct {
 
     /// Calculate the number of display rows needed for current content
     pub fn calculateHeight(self: *const Repl, width: u16) u16 {
+        // Guard against degenerate widths
+        if (width < 10) return 1;
+
         const text = self.buffer.getTextSlice() orelse "";
         const prompt_len: u16 = @intCast(self.config.prompt.len);
         const cont_len: u16 = 4; // "... "
@@ -535,8 +542,16 @@ pub const Repl = struct {
         var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
         errdefer commands.deinit(allocator);
 
-        const text = self.buffer.getTextSlice() orelse "";
         const prompt = self.config.prompt;
+
+        // Guard against degenerate sizes
+        if (size.w < 10) {
+            try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
+            try commands.append(allocator, .{ .draw_text = .{ .text = prompt } });
+            return commands.toOwnedSlice(allocator);
+        }
+
+        const text = self.buffer.getTextSlice() orelse "";
         const continuation = "... ";
         const wrap_indent = "    ";
 
@@ -602,6 +617,11 @@ pub const Repl = struct {
             try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
             try commands.append(allocator, .{ .draw_text = .{ .text = prompt } });
         }
+
+        // Add cursor position and show cursor
+        const cursor_pos = self.getCursorPosition(size.w);
+        try commands.append(allocator, .{ .move_cursor = .{ .x = cursor_pos.x, .y = cursor_pos.y } });
+        try commands.append(allocator, .{ .show_cursor = .{ .visible = true } });
 
         return commands.toOwnedSlice(allocator);
     }
