@@ -44,6 +44,14 @@ pub fn build(b: *std.Build) void {
     });
     logview.addImport("phosphor", phosphor);
 
+    // KeyTester module (key input debugger widget) - depends on phosphor for Key type
+    const keytester = b.addModule("keytester", .{
+        .root_source_file = b.path("src/widgets/keytester/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    keytester.addImport("phosphor", phosphor);
+
     // App module (Elm-style architecture)
     const app_mod = b.addModule("app", .{
         .root_source_file = b.path("src/app.zig"),
@@ -81,7 +89,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const examples = [_]Example{
-        .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview" } },
+        .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview", "keytester" } },
         // App architecture demos (Elm-style)
         .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },
@@ -98,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .{ "thermite", thermite },
         .{ "repl", repl },
         .{ "logview", logview },
+        .{ "keytester", keytester },
         .{ "app", app_mod },
     };
 

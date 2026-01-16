@@ -17,6 +17,8 @@ const repl_mod = @import("repl");
 const Repl = repl_mod.Repl;
 const logview_mod = @import("logview");
 const LogView = logview_mod.LogView;
+const keytester_mod = @import("keytester");
+const KeyTester = keytester_mod.KeyTester;
 
 // ─────────────────────────────────────────────────────────────
 // Model - all application state in one place
@@ -25,12 +27,14 @@ const LogView = logview_mod.LogView;
 const Model = struct {
     log: LogView,
     repl: Repl,
+    keytester: KeyTester,
     size: Size,
     running: bool,
     allocator: std.mem.Allocator,
 
     // Layout structure
     const header_height: u16 = 2; // title + separator
+    const footer_height: u16 = 1; // keytester
     const min_log_lines: u16 = 3;
     const max_input_rows: u16 = 10;
 
@@ -42,6 +46,8 @@ const Model = struct {
             @panic("Failed to init Repl");
         };
 
+        const keytester = KeyTester.init(allocator);
+
         // Welcome messages
         log.append("Welcome to Phosphor REPL Demo!") catch {};
         log.append("Commands: help, clear, history, exit") catch {};
@@ -51,6 +57,7 @@ const Model = struct {
         return .{
             .log = log,
             .repl = repl,
+            .keytester = keytester,
             .size = .{ .w = 80, .h = 24 }, // Will be updated on first resize
             .running = true,
             .allocator = allocator,
@@ -59,6 +66,7 @@ const Model = struct {
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         _ = allocator;
+        self.keytester.deinit();
         self.repl.deinit();
         self.log.deinit();
     }
@@ -119,6 +127,9 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
             model.size = new_size;
         },
         .key => |key| {
+            // Record key to keytester for debugging
+            model.keytester.recordKey(key);
+
             // Route key directly to repl widget (app.Key and phosphor.Key are same type)
             if (model.repl.update(.{ .key = key }) catch null) |repl_msg| {
                 if (repl_msg_map.map(repl_msg)) |mapped| {
@@ -204,8 +215,13 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     };
     const repl_height = repl_view.getHeight();
 
+    // Build keytester view
+    var keytester_view = model.keytester.viewTree(alloc) catch {
+        return ui.text("Error building keytester view");
+    };
+
     // Calculate available height for log
-    const log_available_height = rows -| Model.header_height -| repl_height;
+    const log_available_height = rows -| Model.header_height -| Model.footer_height -| repl_height;
 
     // Build log view
     var log_view = model.log.viewTree(cols, log_available_height, alloc) catch {
@@ -252,23 +268,28 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     var repl_node = repl_view.build();
     repl_node.sizing.h = .{ .fixed = repl_view.getHeight() };
 
+    // KeyTester footer
+    var keytester_node = keytester_view.build();
+    keytester_node.sizing.h = .{ .fixed = 1 };
+
     // Root vbox
-    const root_children = alloc.alloc(LayoutNode, 4) catch {
+    const root_children = alloc.alloc(LayoutNode, 5) catch {
         return ui.text("Error allocating root");
     };
     root_children[0] = header_row;
     root_children[1] = sep_row;
     root_children[2] = log_node;
     root_children[3] = repl_node;
+    root_children[4] = keytester_node;
 
     const root_ptr = alloc.create(LayoutNode) catch {
         return ui.text("Error allocating root node");
     };
     root_ptr.* = LayoutNode.vbox(root_children);
 
-    // Calculate cursor position
+    // Calculate cursor position (repl is above keytester which takes 1 row)
     const cursor_x = repl_view.getCursorX();
-    const repl_start_y = rows - repl_view.getHeight();
+    const repl_start_y = rows - repl_view.getHeight() - Model.footer_height;
     const cursor_y = repl_start_y + repl_view.getCursorRow();
 
     return ui.layoutWithCursor(root_ptr, cursor_x, cursor_y);
