@@ -121,7 +121,11 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
 
         // Repl widget events (via Effect.dispatch)
         .got_submit => |text| {
-            echoToLog(&model.log, text, model.repl.getPrompt()) catch {};
+            // Ignore empty/whitespace-only input
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            if (trimmed.len == 0) return .none;
+
+            echoToLog(&model.log, text) catch {};
             return handleCommand(model, text);
         },
         .got_cancel => {
@@ -165,7 +169,10 @@ fn handleCommand(model: *Model, text: []const u8) Cmd {
         model.log.clear();
         model.log.append("Screen cleared.") catch {};
     } else if (std.mem.eql(u8, trimmed, "help")) {
-        model.log.append("Commands: help, clear, history, exit") catch {};
+        model.log.append("Commands: help, clear, echo <text>, history, exit") catch {};
+    } else if (std.mem.startsWith(u8, trimmed, "echo ")) {
+        const echo_text = trimmed[5..];
+        model.log.print("{s}", .{echo_text}) catch {};
     } else if (std.mem.eql(u8, trimmed, "history")) {
         model.log.print("History has {} entries", .{model.repl.history.count()}) catch {};
     } else if (std.mem.eql(u8, trimmed, "exit")) {
@@ -181,15 +188,15 @@ fn handleCommand(model: *Model, text: []const u8) Cmd {
     return .none;
 }
 
-fn echoToLog(log: *LogView, text: []const u8, prompt: []const u8) !void {
+fn echoToLog(log: *LogView, text: []const u8) !void {
     var lines_iter = std.mem.splitScalar(u8, text, '\n');
     var first = true;
     while (lines_iter.next()) |line| {
         if (first) {
-            try log.print("{s}{s}", .{ prompt, line });
+            try log.print(" > {s}", .{line});
             first = false;
         } else {
-            try log.print("... {s}", .{line});
+            try log.print("   {s}", .{line});
         }
     }
 }
@@ -214,9 +221,12 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
     root.* = ui.vbox(.{
         header,
-        ui.separator(),                                 // Fills available width
+        ui.separator(),                                 // Header separator
         ui.widgetGrow(&model.log),                      // LogView - grows to fill
+        ui.separator(),                                 // Separator above repl
         ui.widget(&model.repl),                         // Repl - uses preferred height
+        ui.separator(),                                 // Separator below repl
+        ui.ltext(""),                                   // Blank line
         ui.widgetFixed(&model.keytester, 1),            // KeyTester - 1 row
     });
 
