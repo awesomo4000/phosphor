@@ -390,13 +390,77 @@ pub const Repl = struct {
     }
 
     /// Get cursor position (x, y) relative to widget origin
-    pub fn getCursorPosition(self: *const Repl) struct { x: u16, y: u16 } {
+    /// Requires width to calculate wrapping
+    pub fn getCursorPosition(self: *const Repl, width: u16) struct { x: u16, y: u16 } {
+        const text = self.buffer.getTextSlice() orelse "";
+        const cursor_pos = self.buffer.cursor();
         const prompt_len: u16 = @intCast(self.config.prompt.len);
-        const cursor: u16 = @intCast(@min(self.buffer.cursor(), 1000));
-        return .{
-            .x = prompt_len + cursor,
-            .y = 0, // Single line for now, multi-line would calculate row
-        };
+        const cont_len: u16 = 4; // "... "
+        const wrap_len: u16 = 4; // "    "
+
+        var cursor_row: u16 = 0;
+        var cursor_col: u16 = prompt_len;
+        var char_idx: usize = 0;
+        var is_first_logical_line = true;
+        var line_start: usize = 0;
+
+        // Process each logical line (split by \n)
+        var i: usize = 0;
+        while (i <= text.len) : (i += 1) {
+            const is_newline = i < text.len and text[i] == '\n';
+            const is_end = i == text.len;
+
+            if (is_newline or is_end) {
+                const line_text = text[line_start..i];
+                const prefix_len = if (is_first_logical_line) prompt_len else cont_len;
+                const content_width = if (width > prefix_len) width - prefix_len else 1;
+                const wrap_content_width = if (width > wrap_len) width - wrap_len else 1;
+
+                if (line_text.len == 0) {
+                    if (cursor_pos >= char_idx and cursor_pos <= char_idx) {
+                        cursor_col = prefix_len;
+                        return .{ .x = cursor_col, .y = cursor_row };
+                    }
+                    cursor_row += 1;
+                } else {
+                    var remaining = line_text.len;
+                    var first_segment = true;
+                    var segment_start: usize = 0;
+
+                    while (remaining > 0) {
+                        const seg_width = if (first_segment) content_width else wrap_content_width;
+                        const seg_len = @min(remaining, seg_width);
+                        const seg_prefix_len: u16 = if (first_segment) prefix_len else wrap_len;
+
+                        const seg_char_start = char_idx + segment_start;
+                        const seg_char_end = seg_char_start + seg_len;
+                        if (cursor_pos >= seg_char_start and cursor_pos <= seg_char_end) {
+                            cursor_col = seg_prefix_len + @as(u16, @intCast(cursor_pos - seg_char_start));
+                            return .{ .x = cursor_col, .y = cursor_row };
+                        }
+
+                        cursor_row += 1;
+                        segment_start += seg_len;
+                        remaining -= seg_len;
+                        first_segment = false;
+                    }
+                }
+
+                char_idx += line_text.len;
+                if (is_newline) {
+                    if (cursor_pos == char_idx) {
+                        cursor_col = cont_len;
+                        return .{ .x = cursor_col, .y = cursor_row };
+                    }
+                    char_idx += 1;
+                }
+
+                line_start = i + 1;
+                is_first_logical_line = false;
+            }
+        }
+
+        return .{ .x = cursor_col, .y = cursor_row };
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -415,12 +479,54 @@ pub const Repl = struct {
         };
     }
 
-    fn localWidgetGetHeight(ptr: *anyopaque, _: u16) u16 {
+    fn localWidgetGetHeight(ptr: *anyopaque, width: u16) u16 {
         const self: *Repl = @ptrCast(@alignCast(ptr));
-        // For now, single-line REPL is 1 row high
-        // TODO: Calculate actual height based on wrapped text
-        _ = self;
-        return 1;
+        return self.calculateHeight(width);
+    }
+
+    /// Calculate the number of display rows needed for current content
+    pub fn calculateHeight(self: *const Repl, width: u16) u16 {
+        const text = self.buffer.getTextSlice() orelse "";
+        const prompt_len: u16 = @intCast(self.config.prompt.len);
+        const cont_len: u16 = 4; // "... "
+        const wrap_len: u16 = 4; // "    "
+
+        var total_rows: u16 = 0;
+        var is_first_logical_line = true;
+        var line_start: usize = 0;
+
+        // Process each logical line (split by \n)
+        var i: usize = 0;
+        while (i <= text.len) : (i += 1) {
+            const is_newline = i < text.len and text[i] == '\n';
+            const is_end = i == text.len;
+
+            if (is_newline or is_end) {
+                const line_text = text[line_start..i];
+                const prefix_len = if (is_first_logical_line) prompt_len else cont_len;
+                const content_width = if (width > prefix_len) width - prefix_len else 1;
+                const wrap_content_width = if (width > wrap_len) width - wrap_len else 1;
+
+                if (line_text.len == 0) {
+                    total_rows += 1;
+                } else {
+                    var remaining = line_text.len;
+                    var first_segment = true;
+                    while (remaining > 0) {
+                        const seg_width = if (first_segment) content_width else wrap_content_width;
+                        const seg_len = @min(remaining, seg_width);
+                        total_rows += 1;
+                        remaining -= seg_len;
+                        first_segment = false;
+                    }
+                }
+
+                line_start = i + 1;
+                is_first_logical_line = false;
+            }
+        }
+
+        return if (total_rows == 0) 1 else total_rows;
     }
 
     fn localWidgetView(ptr: *anyopaque, size: LayoutSize, allocator: Allocator) anyerror![]DrawCommand {
@@ -429,19 +535,73 @@ pub const Repl = struct {
         var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
         errdefer commands.deinit(allocator);
 
-        // Move to local origin (0, 0) - layout will translate to screen position
-        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
-
-        // Render prompt + text
-        const prompt = self.config.prompt;
         const text = self.buffer.getTextSlice() orelse "";
+        const prompt = self.config.prompt;
+        const continuation = "... ";
+        const wrap_indent = "    ";
 
-        // Combine prompt and text
-        const full_line = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prompt, text });
+        const prompt_len: u16 = @intCast(prompt.len);
+        const cont_len: u16 = @intCast(continuation.len);
+        const wrap_len: u16 = @intCast(wrap_indent.len);
+        const width = size.w;
 
-        // Truncate to width
-        const display_len = @min(full_line.len, size.w);
-        try commands.append(allocator, .{ .draw_text = .{ .text = full_line[0..display_len] } });
+        var row: u16 = 0;
+        var is_first_logical_line = true;
+        var line_start: usize = 0;
+
+        // Process each logical line (split by \n)
+        var i: usize = 0;
+        while (i <= text.len) : (i += 1) {
+            const is_newline = i < text.len and text[i] == '\n';
+            const is_end = i == text.len;
+
+            if (is_newline or is_end) {
+                const line_text = text[line_start..i];
+                const prefix = if (is_first_logical_line) prompt else continuation;
+                const prefix_len = if (is_first_logical_line) prompt_len else cont_len;
+                const content_width = if (width > prefix_len) width - prefix_len else 1;
+                const wrap_content_width = if (width > wrap_len) width - wrap_len else 1;
+
+                if (line_text.len == 0) {
+                    // Empty line - just render prefix
+                    try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
+                    try commands.append(allocator, .{ .draw_text = .{ .text = prefix } });
+                    row += 1;
+                } else {
+                    var remaining: usize = line_text.len;
+                    var seg_start: usize = 0;
+                    var first_segment = true;
+
+                    while (remaining > 0) {
+                        const seg_width = if (first_segment) content_width else wrap_content_width;
+                        const seg_len = @min(remaining, seg_width);
+                        const seg_prefix = if (first_segment) prefix else wrap_indent;
+
+                        try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = row } });
+                        // Render prefix + segment
+                        const line = try std.fmt.allocPrint(allocator, "{s}{s}", .{
+                            seg_prefix,
+                            line_text[seg_start .. seg_start + seg_len],
+                        });
+                        try commands.append(allocator, .{ .draw_text = .{ .text = line } });
+
+                        row += 1;
+                        seg_start += seg_len;
+                        remaining -= seg_len;
+                        first_segment = false;
+                    }
+                }
+
+                line_start = i + 1;
+                is_first_logical_line = false;
+            }
+        }
+
+        // Handle empty buffer case
+        if (row == 0) {
+            try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });
+            try commands.append(allocator, .{ .draw_text = .{ .text = prompt } });
+        }
 
         return commands.toOwnedSlice(allocator);
     }

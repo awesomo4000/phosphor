@@ -207,23 +207,21 @@ pub fn view(model: *Model, ui: *Ui) *Node {
         children[i + 2] = ui.ltext(line);
     }
 
-    // Render Repl through layout system - this enables Effect.after.set_cursor
-    // The layout system will track the Repl's position via widget_positions,
-    // allowing the runtime to resolve cursor coordinates automatically.
-    children[children.len - 1] = ui.widget(&model.repl);
+    // Repl height is dynamic based on content
+    const repl_height = model.repl.calculateHeight(cols);
+    children[children.len - 1] = ui.widgetFixed(&model.repl, repl_height);
 
     // Build layout tree
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
     root.* = ui.vbox(children);
 
-    // For now, still use layoutWithCursor for explicit cursor position.
-    // When the runtime fully supports Effect.after.set_cursor, we can
-    // use plain ui.layout(root) and let the runtime resolve cursor from
-    // widget_positions + Effect.setCursor(&model.repl, local_x, local_y).
-    const cursor_x = model.repl.getCursorPosition().x;
-    const repl_row: u16 = 2 + @as(u16, @intCast(visible_lines.len));
+    // Cursor position: relative to repl start position
+    const cursor_pos = model.repl.getCursorPosition(cols);
+    const repl_start_y: u16 = 2 + @as(u16, @intCast(visible_lines.len));
+    const cursor_x = cursor_pos.x;
+    const cursor_y = repl_start_y + cursor_pos.y;
 
-    return ui.layoutWithCursor(root, cursor_x, repl_row);
+    return ui.layoutWithCursor(root, cursor_x, cursor_y);
 }
 
 // ─────────────────────────────────────────────────────────────

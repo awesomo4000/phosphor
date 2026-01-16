@@ -213,19 +213,24 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     });
     header.sizing.h = .{ .fixed = 1 };
 
+    // Repl height is dynamic based on content
+    const repl_height = model.repl.calculateHeight(cols);
+
     // Build the layout tree
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
     root.* = ui.vbox(.{
         header,
         ui.separator(cols),
-        ui.widgetGrow(&model.log),            // LogView - grows to fill
-        ui.widgetFixed(&model.repl, 1),       // Repl - single line
-        ui.widgetFixed(&model.keytester, 1),  // KeyTester - 1 row
+        ui.widgetGrow(&model.log),                      // LogView - grows to fill
+        ui.widgetFixed(&model.repl, repl_height),       // Repl - dynamic height
+        ui.widgetFixed(&model.keytester, 1),            // KeyTester - 1 row
     });
 
-    // Cursor position: repl is 2nd from bottom (above keytester)
-    const cursor_x = model.repl.getCursorPosition().x;
-    const cursor_y = rows - 1 - Model.footer_height;
+    // Cursor position: relative to repl start position
+    const cursor_pos = model.repl.getCursorPosition(cols);
+    const repl_start_y = rows - repl_height - Model.footer_height;
+    const cursor_x = cursor_pos.x;
+    const cursor_y = repl_start_y + cursor_pos.y;
 
     return ui.layoutWithCursor(root, cursor_x, cursor_y);
 }
