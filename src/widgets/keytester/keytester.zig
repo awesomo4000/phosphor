@@ -2,6 +2,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const phosphor = @import("phosphor");
 const LayoutNode = phosphor.LayoutNode;
+const LocalWidgetVTable = phosphor.LocalWidgetVTable;
+const LayoutSize = phosphor.LayoutSize;
+const DrawCommand = phosphor.DrawCommand;
 const Key = phosphor.Key;
 
 /// A widget that displays the last key pressed with its tag name and value.
@@ -66,32 +69,60 @@ pub const KeyTester = struct {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Declarative view (returns LayoutNode)
+    // LocalWidget interface (draws at 0,0, layout translates)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Get a LocalWidgetVTable for use with LayoutNode.localWidget()
+    pub fn localWidget(self: *KeyTester) LocalWidgetVTable {
+        return .{
+            .ptr = self,
+            .getPreferredHeightFn = getPreferredHeight,
+            .viewFn = view,
+        };
+    }
+
+    fn getPreferredHeight(_: *anyopaque, _: u16) u16 {
+        return 1; // Always single line
+    }
+
+    /// Render at local coordinates (0,0). Layout will translate.
+    fn view(ptr: *anyopaque, size: LayoutSize, alloc: Allocator) ![]DrawCommand {
+        const self: *KeyTester = @ptrCast(@alignCast(ptr));
+        self.updateDisplay();
+
+        var commands = try alloc.alloc(DrawCommand, 2);
+        // Draw at (0,0) - layout handles positioning
+        commands[0] = .{ .move_cursor = .{ .x = 0, .y = 0 } };
+        // Truncate to width if needed
+        const text = self.getText();
+        const display_len = @min(text.len, size.w);
+        commands[1] = .{ .draw_text = .{ .text = text[0..display_len] } };
+        return commands;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Legacy viewTree interface (for backwards compatibility)
     // ─────────────────────────────────────────────────────────────
 
     /// Returns a single-line LayoutNode showing the key info
     pub fn viewTree(self: *KeyTester, frame_alloc: Allocator) !ViewTree {
         _ = frame_alloc;
-        // Update display before returning
         self.updateDisplay();
-
-        return ViewTree{
-            .text = self.getText(),
-        };
+        return ViewTree{ .keytester = self };
     }
 
     pub const ViewTree = struct {
-        text: []const u8,
+        keytester: *KeyTester,
 
-        /// Build a text node for the key display
+        /// Build a local widget node
         pub fn build(self: *const ViewTree) LayoutNode {
-            var node = LayoutNode.text(self.text);
-            node.sizing.h = .{ .fixed = 1 };
-            return node;
+            return LayoutNode.localWidgetSized(
+                self.keytester.localWidget(),
+                .{ .w = .{ .grow = .{} }, .h = .{ .fixed = 1 } },
+            );
         }
 
-        pub fn getHeight(self: *const ViewTree) u16 {
-            _ = self;
+        pub fn getHeight(_: *const ViewTree) u16 {
             return 1;
         }
     };

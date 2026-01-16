@@ -209,23 +209,9 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     const cols: u16 = @intCast(model.size.w);
     const rows: u16 = @intCast(model.size.h);
 
-    // Build repl view first to get its height
+    // Build repl view first to get its height (still uses legacy pattern for cursor)
     var repl_view = model.repl.viewTree(cols, alloc) catch {
         return ui.text("Error building repl view");
-    };
-    const repl_height = repl_view.getHeight();
-
-    // Build keytester view
-    var keytester_view = model.keytester.viewTree(alloc) catch {
-        return ui.text("Error building keytester view");
-    };
-
-    // Calculate available height for log
-    const log_available_height = rows -| Model.header_height -| Model.footer_height -| repl_height;
-
-    // Build log view
-    var log_view = model.log.viewTree(cols, log_available_height, alloc) catch {
-        return ui.text("Error building log view");
     };
 
     // Build size indicator text
@@ -260,17 +246,20 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     var sep_row = LayoutNode.text(separator[0..sep_idx]);
     sep_row.sizing.h = .{ .fixed = 1 };
 
-    // Log section
-    var log_node = log_view.build();
+    // Log section - uses localWidget, gets its height from layout system!
+    // No manual height calculation needed.
+    var log_node = LayoutNode.localWidget(model.log.localWidget());
     log_node.sizing.h = .{ .grow = .{} };
 
-    // REPL input
+    // REPL input (still uses legacy pattern for cursor position tracking)
     var repl_node = repl_view.build();
     repl_node.sizing.h = .{ .fixed = repl_view.getHeight() };
 
-    // KeyTester footer
-    var keytester_node = keytester_view.build();
-    keytester_node.sizing.h = .{ .fixed = 1 };
+    // KeyTester footer - uses localWidget via viewTree
+    var keytester_view = model.keytester.viewTree(alloc) catch {
+        return ui.text("Error building keytester view");
+    };
+    const keytester_node = keytester_view.build();
 
     // Root vbox
     const root_children = alloc.alloc(LayoutNode, 5) catch {

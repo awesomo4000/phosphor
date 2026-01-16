@@ -2,6 +2,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const phosphor = @import("phosphor");
 const LayoutNode = phosphor.LayoutNode;
+const LocalWidgetVTable = phosphor.LocalWidgetVTable;
+const LayoutSize = phosphor.LayoutSize;
+const DrawCommand = phosphor.DrawCommand;
 
 /// A scrolling log view widget - displays lines with newest at the bottom.
 /// Like a chat client or terminal output.
@@ -114,14 +117,86 @@ pub const LogView = struct {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // New declarative view (returns LayoutNode tree)
+    // LocalWidget interface (draws at 0,0, layout translates)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Get a LocalWidgetVTable for use with LayoutNode.localWidget()
+    /// The widget will receive its size at render time from the layout system.
+    pub fn localWidget(self: *LogView) LocalWidgetVTable {
+        return .{
+            .ptr = self,
+            .getPreferredHeightFn = null, // Grows to fill
+            .viewFn = localView,
+        };
+    }
+
+    /// Render at local coordinates (0,0). Layout will translate.
+    fn localView(ptr: *anyopaque, size: LayoutSize, alloc: Allocator) ![]DrawCommand {
+        const self: *LogView = @ptrCast(@alignCast(ptr));
+        const visible = self.getVisibleLines(size.h);
+
+        // Count commands needed: move+text for each row, accounting for wrapping
+        var total_rows: usize = 0;
+        for (visible) |line| {
+            total_rows += countWrappedRows(line.text, size.w);
+        }
+
+        // Each row needs: move_cursor + draw_text = 2 commands per row
+        // Plus clear lines for empty space at top
+        const empty_rows = size.h -| @as(u16, @intCast(total_rows));
+        const cmd_count = (empty_rows * 2) + (total_rows * 2);
+
+        var commands = try alloc.alloc(DrawCommand, cmd_count);
+        var cmd_idx: usize = 0;
+
+        // Clear empty rows at top (bottom-aligned content)
+        for (0..empty_rows) |i| {
+            commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = @intCast(i) } };
+            cmd_idx += 1;
+            commands[cmd_idx] = .clear_line;
+            cmd_idx += 1;
+        }
+
+        // Render visible lines with wrapping
+        var row: u16 = empty_rows;
+        for (visible) |line| {
+            var remaining: []const u8 = line.text;
+            while (remaining.len > 0 or row == empty_rows + @as(u16, @intCast(total_rows)) - 1) {
+                const segment_len = @min(remaining.len, size.w);
+                commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = row } };
+                cmd_idx += 1;
+                if (segment_len > 0) {
+                    commands[cmd_idx] = .{ .draw_text = .{ .text = remaining[0..segment_len] } };
+                    remaining = remaining[segment_len..];
+                } else {
+                    commands[cmd_idx] = .{ .draw_text = .{ .text = "" } };
+                }
+                cmd_idx += 1;
+                row += 1;
+                if (remaining.len == 0) break;
+            }
+            // Handle empty lines
+            if (line.text.len == 0 and row < size.h) {
+                commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = row } };
+                cmd_idx += 1;
+                commands[cmd_idx] = .{ .draw_text = .{ .text = "" } };
+                cmd_idx += 1;
+                row += 1;
+            }
+        }
+
+        return commands[0..cmd_idx];
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Legacy declarative view (returns LayoutNode tree)
     // ─────────────────────────────────────────────────────────────
 
     /// Returns a declarative layout tree for the log view.
     /// Width is used for wrapping long lines.
     /// Height limits how many lines are shown (pass available screen rows).
     /// Returns a ViewTree that can build LayoutNodes.
-    pub fn viewTree(self: *const LogView, width: u16, height: u16, frame_alloc: Allocator) !ViewTree {
+    pub fn viewTree(self: *LogView, width: u16, height: u16, frame_alloc: Allocator) !ViewTree {
         const visible = self.getVisibleLines(height);
 
         // First pass: count total rows needed (including wrapped lines)

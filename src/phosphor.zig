@@ -37,13 +37,16 @@ pub const Sub = application.Sub;
 pub const layout = @import("layout.zig");
 pub const LayoutNode = layout.LayoutNode;
 pub const Rect = layout.Rect;
+pub const LayoutSize = layout.Size; // Widget size (w, h) - distinct from backend.Size (terminal size)
 pub const Sizing = layout.Sizing;
 pub const SizingAxis = layout.SizingAxis;
 pub const Padding = layout.Padding;
 pub const Direction = layout.Direction;
 pub const WidgetVTable = layout.WidgetVTable;
+pub const LocalWidgetVTable = layout.LocalWidgetVTable; // New: widgets draw at (0,0)
 pub const renderTree = layout.renderTree;
 pub const Text = layout.Text;
+pub const LocalText = layout.LocalText; // New: example local widget
 pub const Spacer = layout.Spacer;
 
 // Terminal capabilities detection (re-exported from thermite)
