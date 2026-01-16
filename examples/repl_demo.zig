@@ -203,85 +203,43 @@ fn echoToLog(log: *LogView, text: []const u8, prompt: []const u8) !void {
 // ─────────────────────────────────────────────────────────────
 
 pub fn view(model: *Model, ui: *Ui) *Node {
-    const alloc = ui.ally;
-
-    // Get terminal size in cells
     const cols: u16 = @intCast(model.size.w);
     const rows: u16 = @intCast(model.size.h);
 
-    // Build repl view first to get its height (still uses legacy pattern for cursor)
-    var repl_view = model.repl.viewTree(cols, alloc) catch {
+    // Size indicator
+    const size_text = std.fmt.allocPrint(ui.ally, "{d}x{d}", .{ cols, rows }) catch "??x??";
+
+    // Repl needs special handling for cursor position
+    var repl_view = model.repl.viewTree(cols, ui.ally) catch {
         return ui.text("Error building repl view");
     };
-
-    // Build size indicator text
-    const size_text = std.fmt.allocPrint(alloc, "{d}x{d}", .{ cols, rows }) catch "??x??";
-
-    // Build separator
-    const separator = alloc.alloc(u8, cols * 3) catch {
-        return ui.text("Error allocating separator");
-    };
-    var sep_idx: usize = 0;
-    for (0..cols) |_| {
-        separator[sep_idx] = 0xe2;
-        separator[sep_idx + 1] = 0x94;
-        separator[sep_idx + 2] = 0x80;
-        sep_idx += 3;
-    }
-
-    const title_text = "Phosphor REPL Demo";
-
-    // Header row: title + spacer + size indicator
-    const header_children = alloc.alloc(LayoutNode, 3) catch {
-        return ui.text("Error allocating header");
-    };
-    header_children[0] = LayoutNode.text(title_text);
-    header_children[1] = phosphor.Spacer.node();
-    header_children[2] = LayoutNode.text(size_text);
-
-    var header_row = LayoutNode.hbox(header_children);
-    header_row.sizing.h = .{ .fixed = 1 };
-
-    // Separator row
-    var sep_row = LayoutNode.text(separator[0..sep_idx]);
-    sep_row.sizing.h = .{ .fixed = 1 };
-
-    // Log section - uses localWidget, gets its height from layout system!
-    // No manual height calculation needed.
-    var log_node = LayoutNode.localWidget(model.log.localWidget());
-    log_node.sizing.h = .{ .grow = .{} };
-
-    // REPL input (still uses legacy pattern for cursor position tracking)
     var repl_node = repl_view.build();
     repl_node.sizing.h = .{ .fixed = repl_view.getHeight() };
 
-    // KeyTester footer - uses localWidget via viewTree
-    var keytester_view = model.keytester.viewTree(alloc) catch {
-        return ui.text("Error building keytester view");
-    };
-    const keytester_node = keytester_view.build();
+    // Header row
+    var header = ui.hbox(.{
+        ui.ltext("Phosphor REPL Demo"),
+        ui.spacer(),
+        ui.ltext(size_text),
+    });
+    header.sizing.h = .{ .fixed = 1 };
 
-    // Root vbox
-    const root_children = alloc.alloc(LayoutNode, 5) catch {
-        return ui.text("Error allocating root");
-    };
-    root_children[0] = header_row;
-    root_children[1] = sep_row;
-    root_children[2] = log_node;
-    root_children[3] = repl_node;
-    root_children[4] = keytester_node;
+    // Build the layout tree
+    const root = ui.ally.create(LayoutNode) catch @panic("OOM");
+    root.* = ui.vbox(.{
+        header,
+        ui.separator(cols),
+        ui.widgetGrow(&model.log),       // LogView - grows to fill
+        repl_node,                        // Repl - fixed height (needs cursor)
+        ui.widgetFixed(&model.keytester, 1), // KeyTester - 1 row
+    });
 
-    const root_ptr = alloc.create(LayoutNode) catch {
-        return ui.text("Error allocating root node");
-    };
-    root_ptr.* = LayoutNode.vbox(root_children);
-
-    // Calculate cursor position (repl is above keytester which takes 1 row)
+    // Cursor position for repl
     const cursor_x = repl_view.getCursorX();
     const repl_start_y = rows - repl_view.getHeight() - Model.footer_height;
     const cursor_y = repl_start_y + repl_view.getCursorRow();
 
-    return ui.layoutWithCursor(root_ptr, cursor_x, cursor_y);
+    return ui.layoutWithCursor(root, cursor_x, cursor_y);
 }
 
 // ─────────────────────────────────────────────────────────────

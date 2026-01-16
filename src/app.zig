@@ -342,6 +342,93 @@ pub fn CanvasOptions(comptime Ctx: type, comptime Msg: type) type {
 pub const Ui = struct {
     ally: Allocator,
 
+    // ─────────────────────────────────────────────────────────────
+    // Layout builders (return LayoutNode for text-based UIs)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Create a vertical box layout
+    pub fn vbox(self: *Ui, children: anytype) LayoutNode {
+        return self.boxImpl(.vertical, children);
+    }
+
+    /// Create a horizontal box layout
+    pub fn hbox(self: *Ui, children: anytype) LayoutNode {
+        return self.boxImpl(.horizontal, children);
+    }
+
+    fn boxImpl(self: *Ui, direction: phosphor.Direction, children: anytype) LayoutNode {
+        const ChildType = @TypeOf(children);
+        const child_info = @typeInfo(ChildType);
+
+        if (child_info == .@"struct" and child_info.@"struct".is_tuple) {
+            // Tuple of LayoutNodes
+            const fields = child_info.@"struct".fields;
+            const nodes = self.ally.alloc(LayoutNode, fields.len) catch @panic("OOM");
+            inline for (fields, 0..) |field, i| {
+                nodes[i] = @field(children, field.name);
+            }
+            return .{ .direction = direction, .content = .{ .children = nodes } };
+        } else {
+            // Slice of LayoutNodes
+            const nodes = self.ally.dupe(LayoutNode, children) catch @panic("OOM");
+            return .{ .direction = direction, .content = .{ .children = nodes } };
+        }
+    }
+
+    /// Create a spacer that grows to fill available space
+    pub fn spacer(_: *Ui) LayoutNode {
+        return phosphor.Spacer.node();
+    }
+
+    /// Create a text layout node
+    pub fn ltext(_: *Ui, str: []const u8) LayoutNode {
+        return LayoutNode.text(str);
+    }
+
+    /// Create a horizontal separator line
+    pub fn separator(self: *Ui, width: u16) LayoutNode {
+        const sep = self.ally.alloc(u8, width * 3) catch @panic("OOM");
+        var idx: usize = 0;
+        for (0..width) |_| {
+            sep[idx] = 0xe2;     // UTF-8 for ─
+            sep[idx + 1] = 0x94;
+            sep[idx + 2] = 0x80;
+            idx += 3;
+        }
+        var node = LayoutNode.text(sep[0..idx]);
+        node.sizing.h = .{ .fixed = 1 };
+        return node;
+    }
+
+    /// Create a layout node from any widget with localWidget() method.
+    /// The widget receives its size from the layout system at render time.
+    pub fn widget(_: *Ui, w: anytype) LayoutNode {
+        return LayoutNode.localWidget(w.localWidget());
+    }
+
+    /// Create a widget node with explicit sizing
+    pub fn widgetSized(_: *Ui, w: anytype, sizing: phosphor.Sizing) LayoutNode {
+        return LayoutNode.localWidgetSized(w.localWidget(), sizing);
+    }
+
+    /// Create a widget that grows to fill available space
+    pub fn widgetGrow(_: *Ui, w: anytype) LayoutNode {
+        var node = LayoutNode.localWidget(w.localWidget());
+        node.sizing.h = .{ .grow = .{} };
+        return node;
+    }
+
+    /// Create a widget with fixed height
+    pub fn widgetFixed(_: *Ui, w: anytype, height: u16) LayoutNode {
+        var node = LayoutNode.localWidget(w.localWidget());
+        node.sizing.h = .{ .fixed = height };
+        return node;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Legacy Node builders (for canvas-based UIs)
+    // ─────────────────────────────────────────────────────────────
+
     pub fn text(self: *Ui, str: []const u8) *Node {
         const node = self.ally.create(Node) catch @panic("OOM");
         node.* = .{ .data = .{ .text = str } };
