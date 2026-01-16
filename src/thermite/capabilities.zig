@@ -181,12 +181,24 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Check for tmux (affects capabilities)
+    // Important: tmux sets COLORTERM=truecolor, but the outer terminal might not support it
+    // We use passthrough to detect the actual outer terminal capabilities
     if (getEnv("TMUX")) |_| {
         caps.terminal = .tmux;
-        // tmux passes through most capabilities from outer terminal
-        // but we can't easily detect the outer terminal
-        caps.color = .truecolor; // Modern tmux supports this
         caps.synchronized_output = true;
+
+        // Try to detect outer terminal via passthrough
+        // If outer terminal responds to XTVERSION → modern → truecolor safe
+        // If timeout → legacy (like Apple Terminal) → use 256-color
+        if (!has_color_override) {
+            if (probeOuterTerminalViaTmux()) {
+                caps.color = .truecolor;
+            } else {
+                caps.color = .@"256"; // Conservative fallback for legacy terminals
+            }
+        }
+        // Return early - don't let COLORTERM override our passthrough detection
+        return caps;
     }
 
     // Check for Zellij
@@ -260,6 +272,100 @@ pub fn detectFromEnv() Capabilities {
 /// Get environment variable, returning null if not set
 fn getEnv(name: []const u8) ?[]const u8 {
     return posix.getenv(name);
+}
+
+/// Probe outer terminal via tmux passthrough to detect if it's modern.
+/// Returns true if outer terminal responds to XTVERSION (modern terminal).
+/// Returns false on timeout (legacy terminal like Apple Terminal).
+fn probeOuterTerminalViaTmux() bool {
+    // Check current passthrough state
+    const check_result = std.process.Child.run(.{
+        .allocator = std.heap.page_allocator,
+        .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
+    }) catch return true; // If we can't check, assume modern (safer for user experience)
+    defer std.heap.page_allocator.free(check_result.stdout);
+    defer std.heap.page_allocator.free(check_result.stderr);
+
+    const was_enabled = std.mem.indexOf(u8, check_result.stdout, "on") != null;
+
+    // Enable passthrough if needed
+    if (!was_enabled) {
+        _ = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "on" },
+        }) catch return true; // If we can't enable, assume modern
+
+        // Verify it changed
+        const verify_result = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
+        }) catch return true;
+        defer std.heap.page_allocator.free(verify_result.stdout);
+        defer std.heap.page_allocator.free(verify_result.stderr);
+
+        if (std.mem.indexOf(u8, verify_result.stdout, "on") == null) {
+            return true; // Couldn't enable passthrough, assume modern
+        }
+
+        // Small delay for tmux to process config change
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    // Query XTVERSION via passthrough
+    const is_modern = queryXtversionViaPassthrough();
+
+    // Restore passthrough state if we changed it
+    if (!was_enabled) {
+        _ = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "off" },
+        }) catch {};
+    }
+
+    return is_modern;
+}
+
+/// Send XTVERSION query via tmux passthrough and check for response.
+/// Returns true if we got a response (modern terminal).
+fn queryXtversionViaPassthrough() bool {
+    const fd: posix.fd_t = 0; // stdin
+
+    // Save terminal state
+    const original = posix.tcgetattr(fd) catch return true;
+
+    // Set raw mode
+    var raw = original;
+    raw.lflag.ICANON = false;
+    raw.lflag.ECHO = false;
+    raw.cc[@intFromEnum(posix.V.MIN)] = 0;
+    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+    posix.tcsetattr(fd, .FLUSH, raw) catch return true;
+
+    defer posix.tcsetattr(fd, .FLUSH, original) catch {};
+
+    // XTVERSION query: \x1b[>0q
+    // Doubled for passthrough: \x1b\x1b[>0q
+    // Full: \x1bPtmux;\x1b\x1b[>0q\x1b\\
+    _ = posix.write(fd, "\x1bPtmux;\x1b\x1b[>0q\x1b\\") catch return true;
+
+    // Poll with 50ms timeout (modern terminals respond in <10ms, legacy don't respond at all)
+    var fds = [_]posix.pollfd{.{
+        .fd = fd,
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+
+    const poll_result = posix.poll(&fds, 50) catch return true;
+    if (poll_result == 0) {
+        return false; // Timeout - legacy terminal
+    }
+
+    // Got a response - modern terminal
+    // Drain any response data
+    var buf: [256]u8 = undefined;
+    _ = posix.read(fd, &buf) catch {};
+
+    return true;
 }
 
 /// Format color using the appropriate method for the terminal's capabilities

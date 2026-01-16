@@ -54,6 +54,22 @@ pub fn build(b: *std.Build) void {
     app_mod.addImport("phosphor", phosphor);
 
     // ============================================
+    // Diagnostic Tools (built with default target)
+    // ============================================
+    const caps_check = b.addExecutable(.{
+        .name = "caps-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/thermite/caps_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(caps_check);
+    const run_caps_check = b.addRunArtifact(caps_check);
+    run_caps_check.step.dependOn(b.getInstallStep());
+    b.step("run-caps-check", "Run terminal capabilities checker").dependOn(&run_caps_check.step);
+
+    // ============================================
     // Examples
     // ============================================
     const examples_step = b.step("examples", "Build all examples");
@@ -74,8 +90,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mandelbrot-thermite", .path = "examples/thermite/mandelbrot-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "sprites-thermite", .path = "examples/thermite/sprites-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "hypercube-thermite", .path = "examples/thermite/hypercube-thermite.zig", .deps = &.{"thermite"} },
-        // Diagnostic tools
-        .{ .name = "caps-check", .path = "src/thermite/caps_check.zig", .deps = &.{} },
     };
 
     // Module lookup table
