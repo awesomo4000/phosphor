@@ -202,24 +202,6 @@ pub const Repl = struct {
         return text;
     }
 
-    /// Finalize submission without returning text (use when you already have it)
-    /// Adds current text to history and clears buffer
-    pub fn finalizeSubmit(self: *Repl) !void {
-        // Add to history if non-empty (uses slice, no allocation)
-        if (self.buffer.getTextSlice()) |text| {
-            if (text.len > 0) {
-                // history.add() will copy the text internally
-                try self.history.add(text);
-            }
-        }
-
-        // Clear buffer for next input
-        self.buffer.clear();
-        self.history.resetNavigation();
-        self.segments.clearRetainingCapacity();
-        self.in_paste = false;
-    }
-
     /// Get current input text (caller must free)
     pub fn getText(self: *Repl) ![]const u8 {
         return self.buffer.getText(self.allocator);
@@ -233,14 +215,6 @@ pub const Repl = struct {
     /// Get prompt
     pub fn getPrompt(self: *const Repl) []const u8 {
         return self.config.prompt;
-    }
-
-    /// Cancel current input
-    pub fn cancel(self: *Repl) void {
-        self.buffer.clear();
-        self.history.resetNavigation();
-        self.segments.clearRetainingCapacity();
-        self.in_paste = false;
     }
 
     /// Called when paste starts (ESC[200~)
@@ -360,7 +334,7 @@ pub const Repl = struct {
         }
     };
 
-    /// Internal action type (used by handleKey)
+    /// Internal action type (used by handleKey and handleKeyEffect)
     pub const Action = enum {
         none,
         redraw,
@@ -369,52 +343,6 @@ pub const Repl = struct {
         eof,
         clear_screen,
     };
-
-    /// Messages emitted by the Repl widget to the app
-    pub const ReplMsg = union(enum) {
-        text_changed: []const u8,
-        submitted: []const u8,
-        cancelled,
-        eof,
-        clear_screen,
-    };
-
-    /// Widget event types that Repl handles
-    pub const Event = union(enum) {
-        key: Key,
-        paste_start,
-        paste_end,
-    };
-
-    /// Process an event, update internal state, return message for app.
-    /// This is the main entry point for the runtime to send events to the widget.
-    pub fn update(self: *Repl, event: Event) !?ReplMsg {
-        switch (event) {
-            .key => |key| {
-                const action = try self.handleKey(key);
-                return self.actionToMsg(action);
-            },
-            .paste_start => {
-                self.pasteStart();
-                return null;
-            },
-            .paste_end => {
-                self.pasteEnd();
-                return null;
-            },
-        }
-    }
-
-    /// Convert internal Action to app-facing ReplMsg
-    fn actionToMsg(self: *Repl, action: Action) ?ReplMsg {
-        return switch (action) {
-            .none, .redraw => null,
-            .submit => .{ .submitted = self.buffer.getTextSlice() orelse "" },
-            .cancel => .cancelled,
-            .eof => .eof,
-            .clear_screen => .clear_screen,
-        };
-    }
 
     // ─────────────────────────────────────────────────────────────
     // Effect-based API (Lustre-style)
@@ -937,8 +865,8 @@ test "full session simulation without TTY" {
     const action2 = try repl.handleKey(.ctrl_c);
     try std.testing.expectEqual(Repl.Action.cancel, action2);
 
-    // 7. Test Ctrl+D EOF on empty line
-    repl.cancel();
+    // 7. Test Ctrl+D EOF on empty line (buffer cleared by ctrl+c)
+    repl.buffer.clear();
     const action3 = try repl.handleKey(.ctrl_d);
     try std.testing.expectEqual(Repl.Action.eof, action3);
 

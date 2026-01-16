@@ -1,24 +1,18 @@
 const std = @import("std");
 const app = @import("app");
-const phosphor = @import("phosphor");
 
 const Cmd = app.Cmd;
+const Effect = app.Effect;
 const Size = app.Size;
 const Ui = app.Ui;
 const Node = app.Node;
-
-// Phosphor layout types (re-exported through app)
+const Key = app.Key;
 const LayoutNode = app.LayoutNode;
-const Rect = app.Rect;
-const renderTree = app.renderTree;
 
 // Widgets
-const repl_mod = @import("repl");
-const Repl = repl_mod.Repl;
-const logview_mod = @import("logview");
-const LogView = logview_mod.LogView;
-const keytester_mod = @import("keytester");
-const KeyTester = keytester_mod.KeyTester;
+const Repl = @import("repl").Repl;
+const LogView = @import("logview").LogView;
+const KeyTester = @import("keytester").KeyTester;
 
 // ─────────────────────────────────────────────────────────────
 // Model - all application state in one place
@@ -29,14 +23,10 @@ const Model = struct {
     repl: Repl,
     keytester: KeyTester,
     size: Size,
-    running: bool,
     allocator: std.mem.Allocator,
 
-    // Layout structure
-    const header_height: u16 = 2; // title + separator
+    // Layout constants
     const footer_height: u16 = 1; // keytester
-    const min_log_lines: u16 = 3;
-    const max_input_rows: u16 = 10;
 
     pub fn create(allocator: std.mem.Allocator) Model {
         var log = LogView.init(allocator, 1000);
@@ -58,8 +48,7 @@ const Model = struct {
             .log = log,
             .repl = repl,
             .keytester = keytester,
-            .size = .{ .w = 80, .h = 24 }, // Will be updated on first resize
-            .running = true,
+            .size = .{ .w = 80, .h = 24 },
             .allocator = allocator,
         };
     }
@@ -86,34 +75,27 @@ pub fn init(allocator: std.mem.Allocator) Model {
 
 const Msg = union(enum) {
     // System events
-    key: app.Key,
+    key: Key,
     resize: Size,
     tick: f32,
 
-    // Repl widget events (mapped from Repl.ReplMsg)
+    // Repl widget events (via Effect.dispatch)
     got_submit: []const u8,
     got_cancel,
     got_eof,
     got_clear_screen,
 };
 
-// Message mappers using wrap() - declarative child-to-parent message translation
-const repl_msg_map = struct {
-    const submitted = app.wrap(Msg, .got_submit);
-    const cancelled = app.wrapVoid(Msg, .got_cancel);
-    const eof = app.wrapVoid(Msg, .got_eof);
-    const clear_screen = app.wrapVoid(Msg, .got_clear_screen);
-
-    /// Map a ReplMsg to our Msg type
-    fn map(repl_msg: Repl.ReplMsg) ?Msg {
-        return switch (repl_msg) {
-            .submitted => |text| submitted(text),
-            .cancelled => cancelled(),
-            .eof => eof(),
-            .clear_screen => clear_screen(),
-            .text_changed => null, // Ignore text changes
-        };
-    }
+// Repl message configuration - maps Repl events to our Msg type
+const repl_config = Repl.MsgConfig(Msg){
+    .on_submit = struct {
+        fn f(text: []const u8) Msg {
+            return .{ .got_submit = text };
+        }
+    }.f,
+    .on_cancel = .got_cancel,
+    .on_eof = .got_eof,
+    .on_clear_screen = .got_clear_screen,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -121,8 +103,9 @@ const repl_msg_map = struct {
 // ─────────────────────────────────────────────────────────────
 
 pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
+    _ = allocator;
+
     switch (msg) {
-        // System events
         .resize => |new_size| {
             model.size = new_size;
         },
@@ -130,59 +113,72 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
             // Record key to keytester for debugging
             model.keytester.recordKey(key);
 
-            // Route key directly to repl widget (app.Key and phosphor.Key are same type)
-            if (model.repl.update(.{ .key = key }) catch null) |repl_msg| {
-                if (repl_msg_map.map(repl_msg)) |mapped| {
-                    // Recursively handle the mapped message
-                    return update(model, mapped, allocator);
-                }
-            }
+            // Use Effect-based API
+            const effect = model.repl.handleKeyEffect(key, Msg, repl_config) catch return .none;
+            return processEffectToCmd(effect, model);
         },
         .tick => {},
 
-        // Repl widget events (mapped from ReplMsg via wrap())
+        // Repl widget events (via Effect.dispatch)
         .got_submit => |text| {
             echoToLog(&model.log, text, model.repl.getPrompt()) catch {};
-            handleCommand(model, text) catch {};
-            model.repl.finalizeSubmit() catch {};
+            return handleCommand(model, text);
         },
         .got_cancel => {
-            model.repl.cancel();
+            // ^C just shows in log, repl already cleared internally
+            model.log.append("^C") catch {};
         },
         .got_eof => {
-            model.running = false;
+            return .quit;
         },
         .got_clear_screen => {
             model.log.clear();
         },
     }
 
-    if (!model.running) {
-        return .quit;
-    }
     return .none;
 }
 
-fn handleCommand(model: *Model, text: []const u8) !void {
+/// Convert Effect to Cmd (bridge until runtime fully supports Effect)
+fn processEffectToCmd(effect: Effect(Msg), model: *Model) Cmd {
+    switch (effect) {
+        .none => return .none,
+        .quit => return .quit,
+        .dispatch => |msg| {
+            return update(model, msg, model.allocator);
+        },
+        .after => return .none, // Cursor handled by view
+        .batch => |effects| {
+            for (effects) |e| {
+                const result = processEffectToCmd(e, model);
+                if (result == .quit) return .quit;
+            }
+            return .none;
+        },
+    }
+}
+
+fn handleCommand(model: *Model, text: []const u8) Cmd {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
 
     if (std.mem.eql(u8, trimmed, "clear")) {
         model.log.clear();
-        try model.log.append("Screen cleared.");
+        model.log.append("Screen cleared.") catch {};
     } else if (std.mem.eql(u8, trimmed, "help")) {
-        try model.log.append("Commands: help, clear, history, exit");
+        model.log.append("Commands: help, clear, history, exit") catch {};
     } else if (std.mem.eql(u8, trimmed, "history")) {
-        try model.log.print("History has {} entries", .{model.repl.history.count()});
+        model.log.print("History has {} entries", .{model.repl.history.count()}) catch {};
     } else if (std.mem.eql(u8, trimmed, "exit")) {
-        model.running = false;
+        return .quit;
     } else if (trimmed.len > 0) {
         var first_line = trimmed;
         if (std.mem.indexOfScalar(u8, trimmed, '\n')) |idx| {
             first_line = trimmed[0..idx];
         }
         const suffix: []const u8 = if (first_line.len < trimmed.len) "..." else "";
-        try model.log.print("Unknown command: '{s}{s}'. Type 'help' for commands.", .{ first_line, suffix });
+        model.log.print("Unknown command: '{s}{s}'. Type 'help' for commands.", .{ first_line, suffix }) catch {};
     }
+    return .none;
 }
 
 fn echoToLog(log: *LogView, text: []const u8, prompt: []const u8) !void {
@@ -209,13 +205,6 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     // Size indicator
     const size_text = std.fmt.allocPrint(ui.ally, "{d}x{d}", .{ cols, rows }) catch "??x??";
 
-    // Repl needs special handling for cursor position
-    var repl_view = model.repl.viewTree(cols, ui.ally) catch {
-        return ui.text("Error building repl view");
-    };
-    var repl_node = repl_view.build();
-    repl_node.sizing.h = .{ .fixed = repl_view.getHeight() };
-
     // Header row
     var header = ui.hbox(.{
         ui.ltext("Phosphor REPL Demo"),
@@ -229,15 +218,14 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     root.* = ui.vbox(.{
         header,
         ui.separator(cols),
-        ui.widgetGrow(&model.log),       // LogView - grows to fill
-        repl_node,                        // Repl - fixed height (needs cursor)
-        ui.widgetFixed(&model.keytester, 1), // KeyTester - 1 row
+        ui.widgetGrow(&model.log),            // LogView - grows to fill
+        ui.widgetFixed(&model.repl, 1),       // Repl - single line
+        ui.widgetFixed(&model.keytester, 1),  // KeyTester - 1 row
     });
 
-    // Cursor position for repl
-    const cursor_x = repl_view.getCursorX();
-    const repl_start_y = rows - repl_view.getHeight() - Model.footer_height;
-    const cursor_y = repl_start_y + repl_view.getCursorRow();
+    // Cursor position: repl is 2nd from bottom (above keytester)
+    const cursor_x = model.repl.getCursorPosition().x;
+    const cursor_y = rows - 1 - Model.footer_height;
 
     return ui.layoutWithCursor(root, cursor_x, cursor_y);
 }
