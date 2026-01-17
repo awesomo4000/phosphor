@@ -113,11 +113,11 @@ pub const Repl = struct {
                 return .redraw;
             },
             .down => {
+                // Only change text if actively navigating history
                 if (self.history.next()) |text| {
                     try self.buffer.setText(text);
-                } else {
-                    self.buffer.clear();
                 }
+                // Don't clear when reaching end - keep current input
                 return .redraw;
             },
             .ctrl_a => {
@@ -141,6 +141,7 @@ pub const Repl = struct {
                 return .redraw;
             },
             .ctrl_c => {
+                self.buffer.clear();
                 return .cancel;
             },
             .ctrl_d => {
@@ -161,8 +162,14 @@ pub const Repl = struct {
                 self.buffer.moveCursorWordRight();
                 return .redraw;
             },
-            .ctrl_o, .shift_enter, .alt_enter => {
-                // Insert newline for multiline editing
+            .ctrl_o => {
+                // Emacs-style open-line: insert newline, keep cursor on current line
+                try self.buffer.insertChar('\n');
+                self.buffer.moveCursorLeft(1);
+                return .redraw;
+            },
+            .shift_enter, .alt_enter => {
+                // Insert newline and move to it (standard multiline editing)
                 try self.buffer.insertChar('\n');
                 return .redraw;
             },
@@ -371,7 +378,12 @@ pub const Repl = struct {
         return switch (action) {
             .none, .redraw => .none,
             .submit => blk: {
-                const text = self.buffer.getTextSlice() orelse "";
+                // getTextSlice only works when cursor at end; fall back to getText
+                const text_slice = self.buffer.getTextSlice();
+                const text_alloc = if (text_slice == null) self.buffer.getText(self.allocator) catch "" else null;
+                defer if (text_alloc) |t| self.allocator.free(t);
+                const text = text_slice orelse text_alloc.?;
+
                 // Add to history and clear buffer
                 if (text.len > 0) {
                     try self.history.add(text);
@@ -397,7 +409,12 @@ pub const Repl = struct {
         // Guard against degenerate widths
         if (width < 10) return .{ .x = prompt_len, .y = 0 };
 
-        const text = self.buffer.getTextSlice() orelse "";
+        // getTextSlice only works when cursor at end; fall back to getText which allocates
+        const text_slice = self.buffer.getTextSlice();
+        const text_alloc = if (text_slice == null) self.buffer.getText(self.allocator) catch return .{ .x = prompt_len, .y = 0 } else null;
+        defer if (text_alloc) |t| self.allocator.free(t);
+        const text = text_slice orelse text_alloc.?;
+
         const cursor_pos = self.buffer.cursor();
         const cont_len: u16 = 4; // "... "
         const wrap_len: u16 = 4; // "    "
@@ -493,7 +510,12 @@ pub const Repl = struct {
         // Guard against degenerate widths
         if (width < 10) return 1;
 
-        const text = self.buffer.getTextSlice() orelse "";
+        // getTextSlice only works when cursor at end; fall back to getText which allocates
+        const text_slice = self.buffer.getTextSlice();
+        const text_alloc = if (text_slice == null) self.buffer.getText(self.allocator) catch return 1 else null;
+        defer if (text_alloc) |t| self.allocator.free(t);
+        const text = text_slice orelse text_alloc.?;
+
         const prompt_len: u16 = @intCast(self.config.prompt.len);
         const cont_len: u16 = 4; // "... "
         const wrap_len: u16 = 4; // "    "
@@ -551,7 +573,8 @@ pub const Repl = struct {
             return commands.toOwnedSlice(allocator);
         }
 
-        const text = self.buffer.getTextSlice() orelse "";
+        // getTextSlice() only works when cursor is at end; use getText() as fallback
+        const text = self.buffer.getTextSlice() orelse try self.buffer.getText(allocator);
         const continuation = "... ";
         const wrap_indent = "    ";
 
@@ -1041,17 +1064,101 @@ test "full session simulation without TTY" {
     try std.testing.expectEqualStrings("abcdXef", text);
     std.testing.allocator.free(text);
 
-    // 6. Test Ctrl+C cancel
+    // 6. Test Ctrl+C cancel (should clear buffer)
     const action2 = try repl.handleKey(.ctrl_c);
     try std.testing.expectEqual(Repl.Action.cancel, action2);
+    try std.testing.expectEqual(@as(usize, 0), repl.buffer.len()); // Buffer should be cleared
 
-    // 7. Test Ctrl+D EOF on empty line (buffer cleared by ctrl+c)
-    repl.buffer.clear();
+    // 7. Test Ctrl+D EOF on empty line (buffer already cleared by ctrl+c)
     const action3 = try repl.handleKey(.ctrl_d);
     try std.testing.expectEqual(Repl.Action.eof, action3);
 
     // 8. Verify history was saved
     try std.testing.expectEqual(@as(usize, 1), repl.history.count());
+}
+
+test "down arrow does not clear text when not navigating history" {
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type some text
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'e' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+
+    // Press down - should NOT clear text (no history to navigate)
+    _ = try repl.handleKey(.down);
+
+    const text = try repl.getText();
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("hello", text);
+}
+
+test "ctrl+o inserts newline but keeps cursor before it" {
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type "helloworld"
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'e' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    _ = try repl.handleKey(.{ .char = 'w' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+    _ = try repl.handleKey(.{ .char = 'r' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'd' });
+
+    // Move cursor to middle (after "hello")
+    _ = try repl.handleKey(.left);
+    _ = try repl.handleKey(.left);
+    _ = try repl.handleKey(.left);
+    _ = try repl.handleKey(.left);
+    _ = try repl.handleKey(.left);
+    try std.testing.expectEqual(@as(usize, 5), repl.getCursor());
+
+    // Ctrl+O - insert newline but cursor stays before it
+    _ = try repl.handleKey(.ctrl_o);
+
+    const text = try repl.getText();
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("hello\nworld", text);
+
+    // Cursor should still be at position 5 (before the newline)
+    try std.testing.expectEqual(@as(usize, 5), repl.getCursor());
+}
+
+test "getText works correctly when cursor is in middle" {
+    var repl = try Repl.init(std.testing.allocator, .{ .prompt = "> " });
+    defer repl.deinit();
+
+    // Type "hello"
+    _ = try repl.handleKey(.{ .char = 'h' });
+    _ = try repl.handleKey(.{ .char = 'e' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'l' });
+    _ = try repl.handleKey(.{ .char = 'o' });
+
+    // Move cursor to middle
+    _ = try repl.handleKey(.left);
+    _ = try repl.handleKey(.left);
+    try std.testing.expectEqual(@as(usize, 3), repl.getCursor());
+
+    // getText should return full text even with cursor in middle
+    const text = try repl.getText();
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("hello", text);
+
+    // getTextSlice returns null when cursor not at end
+    try std.testing.expect(repl.buffer.getTextSlice() == null);
+
+    // But getTextParts always works
+    const parts = repl.buffer.getTextParts();
+    try std.testing.expectEqualStrings("hel", parts.before);
+    try std.testing.expectEqualStrings("lo", parts.after);
 }
 
 test "view generates draw commands" {

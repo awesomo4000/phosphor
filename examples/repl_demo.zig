@@ -129,8 +129,8 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
             return handleCommand(model, text);
         },
         .got_cancel => {
-            // ^C just shows in log, repl already cleared internally
-            model.log.append("^C") catch {};
+            // ^C cancels current input (buffer already cleared by Repl widget)
+            // Silent cancel - no output to log
         },
         .got_eof => {
             return .quit;

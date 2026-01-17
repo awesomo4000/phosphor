@@ -218,6 +218,15 @@ pub const LineBuffer = struct {
         return null;
     }
 
+    /// Get text as two slices (before cursor and after cursor)
+    /// Always valid, no allocation needed. Iterate both to get full text.
+    pub fn getTextParts(self: *const LineBuffer) struct { before: []const u8, after: []const u8 } {
+        return .{
+            .before = self.buffer[0..self.gap_start],
+            .after = self.buffer[self.gap_end..],
+        };
+    }
+
     /// Set the entire text content, cursor goes to end
     pub fn setText(self: *LineBuffer, text: []const u8) !void {
         self.clear();
