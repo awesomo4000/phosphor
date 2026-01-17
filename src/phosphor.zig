@@ -59,6 +59,7 @@ pub const WidgetPosition = layout.WidgetPosition;
 pub const Text = layout.Text;
 pub const LocalText = layout.LocalText; // New: example local widget
 pub const Spacer = layout.Spacer;
+pub const JustifiedRow = layout.JustifiedRow; // Left/right text with right priority
 
 // Widgets
 pub const Separator = @import("widgets/separator.zig").Separator;

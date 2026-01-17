@@ -681,6 +681,87 @@ pub const LocalText = struct {
 };
 
 // ─────────────────────────────────────────────────────────────
+// JustifiedRow - left/right text with right priority
+// ─────────────────────────────────────────────────────────────
+
+/// A row with left and right text, where right text has priority.
+/// If there's not enough width, left text is truncated first.
+/// A minimum of 1 space separates left and right.
+pub const JustifiedRow = struct {
+    left: []const u8,
+    right: []const u8,
+
+    pub fn init(left: []const u8, right: []const u8) JustifiedRow {
+        return .{ .left = left, .right = right };
+    }
+
+    /// Get a LocalWidgetVTable for use with LayoutNode.localWidget()
+    pub fn localWidget(self: *const JustifiedRow) LocalWidgetVTable {
+        return .{
+            .ptr = @constCast(@ptrCast(self)),
+            .getPreferredWidthFn = null, // Grows to fill
+            .viewFn = view,
+        };
+    }
+
+    /// Create a LayoutNode for this justified row (single line height)
+    pub fn node(self: *const JustifiedRow) LayoutNode {
+        return .{
+            .sizing = .{ .w = .{ .grow = .{} }, .h = .{ .fixed = 1 } },
+            .content = .{ .local_widget = self.localWidget() },
+        };
+    }
+
+    /// Render at local coordinates (0,0). Layout will translate to screen position.
+    fn view(ptr: *anyopaque, size: Size, allocator: Allocator) ![]DrawCommand {
+        const self: *const JustifiedRow = @ptrCast(@alignCast(ptr));
+
+        // Guard against degenerate size
+        if (size.w < 1) {
+            return try allocator.alloc(DrawCommand, 0);
+        }
+
+        var commands = try allocator.alloc(DrawCommand, 4);
+        var cmd_idx: usize = 0;
+
+        const width: usize = size.w;
+        const right_len = self.right.len;
+        const left_len = self.left.len;
+
+        // Right text always shown in full (if it fits)
+        const right_display = @min(right_len, width);
+
+        // Calculate space for left text: width - right - 1 (for minimum gap)
+        const left_available = if (width > right_display + 1)
+            width - right_display - 1
+        else
+            0;
+        const left_display = @min(left_len, left_available);
+
+        // Draw left text at (0,0)
+        if (left_display > 0) {
+            commands[cmd_idx] = .{ .move_cursor = .{ .x = 0, .y = 0 } };
+            cmd_idx += 1;
+            const left_bytes = utf8BytesForColumns(self.left, @intCast(left_display));
+            commands[cmd_idx] = .{ .draw_text = .{ .text = self.left[0..left_bytes] } };
+            cmd_idx += 1;
+        }
+
+        // Draw right text at right edge
+        if (right_display > 0) {
+            const right_x: u16 = @intCast(width - right_display);
+            commands[cmd_idx] = .{ .move_cursor = .{ .x = right_x, .y = 0 } };
+            cmd_idx += 1;
+            const right_bytes = utf8BytesForColumns(self.right, @intCast(right_display));
+            commands[cmd_idx] = .{ .draw_text = .{ .text = self.right[0..right_bytes] } };
+            cmd_idx += 1;
+        }
+
+        return commands[0..cmd_idx];
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────
 

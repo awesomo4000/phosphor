@@ -246,31 +246,22 @@ pub const Renderer = struct {
         self.output_buffer.clearRetainingCapacity();
         const writer = self.output_buffer.writer(self.allocator);
 
-        // Begin synchronized output mode (reduces flicker) - only if supported
-        if (self.caps.synchronized_output) {
-            try writer.writeAll("\x1b[?2026h");
-        }
-
         // Force full render on first frame
         const force_full = self.first_frame;
         if (self.first_frame) {
-            // For terminals that don't handle alt screen well, clear row-by-row
-            // with explicit positioning (don't rely on auto-wrap which can corrupt state)
-            if (self.caps.terminal == .apple_terminal or
-                self.caps.terminal == .linux_console or
-                self.caps.terminal == .unknown)
-            {
-                try writer.writeAll("\x1b[0m\x1b[40m"); // Reset + black bg
-                // Clear each row with explicit positioning
-                for (0..self.term_height) |y| {
-                    try writer.print("\x1b[{};1H\x1b[2K", .{y + 1}); // Move to row, erase line
-                }
-                try writer.writeAll(terminal.CURSOR_HOME);
-            } else {
-                try writer.writeAll(terminal.CLEAR_SCREEN);
-                try writer.writeAll(terminal.CURSOR_HOME);
-            }
+            // Full reset sequence to clear any terminal state issues during resize
+            try writer.writeAll("\x1b[0m"); // Reset attributes
+            try writer.writeAll("\x1b[?7h"); // Enable auto-wrap (ensure it's on)
+            try writer.writeAll("\x1b[2J"); // Clear screen
+            try writer.writeAll("\x1b[H"); // Home cursor
             self.first_frame = false;
+        }
+
+        // Begin synchronized output mode AFTER clear screen (reduces flicker)
+        // Only use for incremental updates, not full redraws
+        const use_sync = self.caps.synchronized_output and !force_full;
+        if (use_sync) {
+            try writer.writeAll("\x1b[?2026h");
         }
 
         var current_fg: ?u32 = null;
@@ -291,22 +282,24 @@ pub const Renderer = struct {
                     }
                 }
 
-                // Skip blank cells on first frame ONLY for terminals with proper alt screen
-                // For Terminal.app and others, we need to render every cell explicitly
-                if (force_full and new_cell != null and new_cell.?.isDefault()) {
-                    // Only skip default cells if terminal properly supports transparent bg
-                    if (self.caps.terminal != .apple_terminal and
-                        self.caps.terminal != .linux_console and
-                        self.caps.terminal != .unknown)
-                    {
-                        cursor_moved = false;
-                        continue;
-                    }
-                }
+                // DISABLED: Skip blank cells optimization
+                // This was causing cursor drift issues in Ghostty where characters
+                // would disappear (especially second-to-last character in a row).
+                // Now we render every cell explicitly on force_full for reliability.
+                // if (force_full and new_cell != null and new_cell.?.isDefault()) {
+                //     if (self.caps.terminal != .apple_terminal and
+                //         self.caps.terminal != .linux_console and
+                //         self.caps.terminal != .unknown)
+                //     {
+                //         cursor_moved = false;
+                //         continue;
+                //     }
+                // }
 
                 if (new_cell) |cell| {
-                    // Move cursor if needed
-                    if (!cursor_moved) {
+                    // Move cursor if needed (position explicitly when cursor location is unknown)
+                    // On force_full, position EVERY cell explicitly to avoid Ghostty cursor drift bugs
+                    if (!cursor_moved or force_full) {
                         try writer.print("\x1b[{};{}H", .{ y + 1, x + 1 });
                         cursor_moved = true;
                     }
@@ -349,7 +342,8 @@ pub const Renderer = struct {
         }
 
         // End synchronized output mode (tells terminal to display the frame)
-        if (self.caps.synchronized_output) {
+        // Only if we started it (not used for force_full redraws)
+        if (self.caps.synchronized_output and !force_full) {
             try writer.writeAll("\x1b[?2026l");
         }
 

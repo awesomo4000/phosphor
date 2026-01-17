@@ -397,6 +397,15 @@ pub const Ui = struct {
         return LayoutNode.text(str);
     }
 
+    /// Create a justified row with left and right text.
+    /// Right text has priority - if space is limited, left text is truncated first.
+    /// Useful for headers like "Title ... 80x24" where the size should always be visible.
+    pub fn justified(self: *Ui, left: []const u8, right: []const u8) LayoutNode {
+        const justified_row = self.ally.create(phosphor.JustifiedRow) catch @panic("OOM");
+        justified_row.* = phosphor.JustifiedRow.init(left, right);
+        return justified_row.node();
+    }
+
     /// Create a horizontal separator line (fills available width)
     pub fn separator(_: *Ui) LayoutNode {
         return phosphor.Separator.node();

@@ -209,13 +209,8 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     // Size indicator (for display only - layout system handles actual sizing)
     const size_text = std.fmt.allocPrint(ui.ally, "{d}x{d}", .{ model.size.w, model.size.h }) catch "??x??";
 
-    // Header row
-    var header = ui.hbox(.{
-        ui.ltext("Phosphor REPL Demo"),
-        ui.spacer(),
-        ui.ltext(size_text),
-    });
-    header.sizing.h = .{ .fixed = 1 };
+    // Header row: title on left, size on right (size has priority if space is limited)
+    const header = ui.justified("Phosphor REPL Demo", size_text);
 
     // Build the layout tree - widgets get their size from the layout system
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
