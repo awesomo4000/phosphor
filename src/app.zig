@@ -1283,7 +1283,7 @@ const Terminal = struct {
             10, 13 => .enter,
             27 => .escape,
             127 => .backspace,
-            else => if (buf[0] >= 32 and buf[0] < 127) .{ .char = buf[0] } else .unknown,
+            else => if (buf[0] >= 32 and buf[0] < 127) .{ .char = buf[0] } else .{ .unknown = buf[0] },
         };
         return .{ .key = key };
     }

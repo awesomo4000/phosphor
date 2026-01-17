@@ -284,7 +284,7 @@ pub const Key = union(enum) {
     shift_enter,
     shift_tab,
 
-    unknown,
+    unknown: u8, // Stores the first byte of unrecognized input
 };
 
 /// Read a key event, parsing escape sequences for arrow keys, etc.
@@ -374,7 +374,7 @@ fn parseKeySequence(seq: []const u8) ?Key {
         9 => .tab,
         10, 13 => .enter,
         127 => .backspace,
-        else => if (first >= 32 and first < 127) .{ .char = first } else .unknown,
+        else => if (first >= 32 and first < 127) .{ .char = first } else .{ .unknown = first },
     };
 }
 
@@ -392,7 +392,7 @@ fn parseCSISequence(seq: []const u8) Key {
             'H' => .home,
             'F' => .end,
             'Z' => .shift_tab,
-            else => .unknown,
+            else => .{ .unknown = seq[0] },
         };
     }
 
@@ -411,7 +411,7 @@ fn parseCSISequence(seq: []const u8) Key {
                     'D' => .ctrl_left,
                     'H' => .ctrl_home,
                     'F' => .ctrl_end,
-                    else => .unknown,
+                    else => .{ .unknown = key_char },
                 };
             }
             // Shift modifier (2) - just return base key for now
@@ -421,7 +421,7 @@ fn parseCSISequence(seq: []const u8) Key {
                     'B' => .down,
                     'C' => .right,
                     'D' => .left,
-                    else => .unknown,
+                    else => .{ .unknown = key_char },
                 };
             }
             // Alt modifier (3) - treat as base key for now
@@ -431,11 +431,11 @@ fn parseCSISequence(seq: []const u8) Key {
                     'B' => .down,
                     'C' => .right,
                     'D' => .left,
-                    else => .unknown,
+                    else => .{ .unknown = key_char },
                 };
             }
         }
-        return .unknown;
+        return .{ .unknown = seq[0] };
     }
 
     // Keypad/extended keys: ESC [ <num> ~
@@ -471,11 +471,11 @@ fn parseCSISequence(seq: []const u8) Key {
             21 => .{ .f = 10 },
             23 => .{ .f = 11 },
             24 => .{ .f = 12 },
-            else => .unknown,
+            else => .{ .unknown = seq[0] },
         };
     }
 
-    return .unknown;
+    return .{ .unknown = seq[0] };
 }
 
 // ============================================================================

@@ -229,7 +229,7 @@ fn readKeyAsEvent() !?Event {
             9 => .tab,
             10, 13 => .enter,
             27 => return readEscapeSequence(stdin),
-            else => .unknown,
+            else => .{ .unknown = c },
         } };
     }
 
@@ -246,7 +246,7 @@ fn readKeyAsEvent() !?Event {
         return readUtf8Event(stdin, c);
     }
 
-    return .{ .key = .unknown };
+    return .{ .key = .{ .unknown = c } };
 }
 
 fn readEscapeSequence(stdin: std.fs.File) !?Event {
@@ -291,7 +291,7 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
             '3' => blk: {
                 _ = try stdin.read(&buf);
                 if (buf[0] == '~') break :blk .delete;
-                break :blk .unknown;
+                break :blk .{ .unknown = buf[0] };
             },
             '1' => blk: {
                 _ = try stdin.read(&buf);
@@ -301,9 +301,9 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
                     if (buf[0] == 'C') break :blk .ctrl_right;
                     if (buf[0] == 'D') break :blk .ctrl_left;
                 }
-                break :blk .unknown;
+                break :blk .{ .unknown = buf[0] };
             },
-            else => .unknown,
+            else => .{ .unknown = buf[0] },
         } };
     }
 
@@ -312,7 +312,7 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
         return .{ .key = switch (buf[0]) {
             'H' => .home,
             'F' => .end,
-            else => .unknown,
+            else => .{ .unknown = buf[0] },
         } };
     }
 
@@ -321,21 +321,21 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
         return .{ .key = .ctrl_o }; // Treat as newline insert
     }
 
-    return .{ .key = .unknown };
+    return .{ .key = .{ .unknown = buf[0] } };
 }
 
 fn readUtf8Event(stdin: std.fs.File, first_byte: u8) !?Event {
-    const len: usize = if (first_byte & 0xF0 == 0xF0) 4 else if (first_byte & 0xE0 == 0xE0) 3 else if (first_byte & 0xC0 == 0xC0) 2 else return .{ .key = .unknown };
+    const len: usize = if (first_byte & 0xF0 == 0xF0) 4 else if (first_byte & 0xE0 == 0xE0) 3 else if (first_byte & 0xC0 == 0xC0) 2 else return .{ .key = .{ .unknown = first_byte } };
 
     var utf8_buf: [4]u8 = undefined;
     utf8_buf[0] = first_byte;
 
     const bytes_read = try stdin.read(utf8_buf[1..len]);
     if (bytes_read != len - 1) {
-        return .{ .key = .unknown };
+        return .{ .key = .{ .unknown = first_byte } };
     }
 
-    const codepoint = std.unicode.utf8Decode(utf8_buf[0..len]) catch return .{ .key = .unknown };
+    const codepoint = std.unicode.utf8Decode(utf8_buf[0..len]) catch return .{ .key = .{ .unknown = first_byte } };
     return .{ .key = .{ .char = codepoint } };
 }
 

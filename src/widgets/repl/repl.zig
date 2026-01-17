@@ -180,7 +180,7 @@ pub const Repl = struct {
             .escape => {
                 return .none;
             },
-            .unknown => {
+            .unknown => |_| {
                 return .none;
             },
             // Unhandled keys (page up/down, F-keys, etc.)
