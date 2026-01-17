@@ -254,19 +254,16 @@ pub const Renderer = struct {
         // Force full render on first frame
         const force_full = self.first_frame;
         if (self.first_frame) {
-            // For terminals that don't handle alt screen well, fill entire screen with black
+            // For terminals that don't handle alt screen well, clear row-by-row
+            // with explicit positioning (don't rely on auto-wrap which can corrupt state)
             if (self.caps.terminal == .apple_terminal or
                 self.caps.terminal == .linux_console or
                 self.caps.terminal == .unknown)
             {
-                // Set black background, then fill screen with spaces
                 try writer.writeAll("\x1b[0m\x1b[40m"); // Reset + black bg
-                try writer.writeAll(terminal.CURSOR_HOME);
-                // Fill every cell with space (black bg)
-                for (0..self.term_height) |_| {
-                    for (0..self.term_width) |_| {
-                        try writer.writeByte(' ');
-                    }
+                // Clear each row with explicit positioning
+                for (0..self.term_height) |y| {
+                    try writer.print("\x1b[{};1H\x1b[2K", .{y + 1}); // Move to row, erase line
                 }
                 try writer.writeAll(terminal.CURSOR_HOME);
             } else {
@@ -340,6 +337,12 @@ pub const Renderer = struct {
                         var buf: [4]u8 = undefined;
                         const len = try std.unicode.utf8Encode(@intCast(cell.ch), &buf);
                         try writer.writeAll(buf[0..len]);
+                    }
+
+                    // After writing to last column, cursor enters "pending wrap" state.
+                    // Force repositioning for next cell to prevent incorrect wrapping.
+                    if (x == self.term_width - 1) {
+                        cursor_moved = false;
                     }
                 }
             }

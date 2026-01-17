@@ -724,8 +724,18 @@ pub fn App(comptime Module: type) type {
                     }
                 }
 
-                // Check for terminal resize
-                if (renderer.checkResize()) |_| {
+                // Check for terminal resize - use ioctl to get actual size, not just signal
+                // This handles coalesced SIGWINCH signals during slow resizing
+                const actual_size = thermite.terminal.getCurrentSize(renderer.ttyfd);
+                const size_changed = if (actual_size) |actual|
+                    actual.width != renderer.term_width or actual.height != renderer.term_height
+                else
+                    renderer.checkResize() != null;
+
+                if (size_changed) {
+                    if (actual_size) |actual| {
+                        renderer.resize(actual.width, actual.height) catch {};
+                    }
                     // Send resize with appropriate dimensions based on view type
                     if (@hasField(Msg, "resize")) {
                         const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
@@ -781,6 +791,15 @@ pub fn App(comptime Module: type) type {
                     // This enables Effect.after.set_cursor to resolve absolute positions
                     const render_result = try renderTreeWithPositions(ref.node, bounds, frame_arena.allocator());
                     executeDrawCommands(renderer, render_result.commands);
+
+                    // Skip output if terminal size changed during layout/drawing
+                    // Query actual size right before output to catch late resizes
+                    if (thermite.terminal.getCurrentSize(renderer.ttyfd)) |current| {
+                        if (current.width != renderer.term_width or current.height != renderer.term_height) {
+                            continue; // Size changed, let next frame handle it
+                        }
+                    }
+
                     try renderer.renderDifferential();
 
                     // Position and show cursor AFTER render

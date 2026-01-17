@@ -98,6 +98,10 @@ pub fn enterRawMode(fd: i32) !void {
     // tells the terminal this is a full-screen app (may improve resize behavior)
     _ = try std.posix.write(fd, ENTER_ALT_SCREEN);
 
+    // Disable auto-wrap mode (DECAWM) - prevents unexpected wrapping when writing
+    // to the last column. We use explicit cursor positioning instead.
+    _ = try std.posix.write(fd, "\x1b[?7l");
+
     // NOTE: Don't enable sync output mode here - it buffers subsequent writes
     // (hideCursor, clearScreen) until the end marker is sent. Instead, sync
     // mode is enabled/disabled per-frame in renderDifferential().
@@ -110,6 +114,9 @@ pub fn exitRawMode(fd: i32) !void {
 
     // Disable synchronized output mode
     _ = std.posix.write(fd, "\x1b[?2026l") catch {};
+
+    // Re-enable auto-wrap mode
+    _ = std.posix.write(fd, "\x1b[?7h") catch {};
 
     // Exit alternate screen buffer - restores main screen
     _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
@@ -527,6 +534,35 @@ pub fn installSignalHandlers(fd: i32) void {
     _ = std.posix.sigaction(std.posix.SIG.INT, &cleanup_act, null);
     _ = std.posix.sigaction(std.posix.SIG.TERM, &cleanup_act, null);
     _ = std.posix.sigaction(std.posix.SIG.HUP, &cleanup_act, null);
+}
+
+/// Check if resize is pending without clearing the flag
+/// Use this to skip rendering when another resize is imminent
+pub fn isResizePending() bool {
+    return resize_pending;
+}
+
+/// Query current terminal size directly (for validation before output)
+pub fn getCurrentSize(fd: i32) ?struct { width: u32, height: u32 } {
+    // Zero-initialize to detect ioctl failures (would leave garbage otherwise)
+    var winsize: std.posix.winsize = std.mem.zeroes(std.posix.winsize);
+
+    const result: c_int = switch (system) {
+        .linux => @bitCast(std.os.linux.ioctl(fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize))),
+        .macos => blk: {
+            const TIOCGWINSZ = 0x40087468;
+            break :blk std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&winsize));
+        },
+        else => return null,
+    };
+
+    // ioctl returns -1 on error
+    if (result == -1) return null;
+
+    if (winsize.col > 0 and winsize.row > 0) {
+        return .{ .width = winsize.col, .height = winsize.row };
+    }
+    return null;
 }
 
 /// Check if resize is pending, returns new size if so
