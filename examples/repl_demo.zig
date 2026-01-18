@@ -25,13 +25,10 @@ const Model = struct {
     size: Size,
     allocator: std.mem.Allocator,
 
-    // Layout constants
-    const footer_height: u16 = 1; // keytester
-
     pub fn create(allocator: std.mem.Allocator) Model {
         var log = LogView.init(allocator, 1000);
 
-        const repl = Repl.init(allocator, .{ .prompt = "phosphor> " }) catch {
+        const repl = Repl.init(allocator, .{ .prompt = "p> " }) catch {
             log.deinit();
             @panic("Failed to init Repl");
         };
@@ -216,13 +213,13 @@ pub fn view(model: *Model, ui: *Ui) *Node {
     const root = ui.ally.create(LayoutNode) catch @panic("OOM");
     root.* = ui.vbox(.{
         header,
-        ui.separator(),                                 // Header separator
-        ui.widgetGrow(&model.log),                      // LogView - grows to fill
-        ui.separator(),                                 // Separator above repl
-        ui.widget(&model.repl),                         // Repl - uses preferred height
-        ui.separator(),                                 // Separator below repl
-        ui.ltext(""),                                   // Blank line
-        ui.widgetFixed(&model.keytester, 1),            // KeyTester - 1 row
+        ui.separator(), // Header separator
+        ui.widgetGrow(&model.log), // LogView - grows to fill
+        ui.separator(), // Separator above repl
+        ui.widget(&model.repl), // Repl - uses preferred height
+        ui.separator(), // Separator below repl
+        ui.ltext(""), // Blank line
+        ui.widgetFixed(&model.keytester, 1), // KeyTester - 1 row
     });
 
     // Cursor position handled by Repl widget via Effect system
