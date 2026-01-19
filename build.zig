@@ -99,6 +99,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mandelbrot-thermite", .path = "examples/thermite/mandelbrot-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "sprites-thermite", .path = "examples/thermite/sprites-thermite.zig", .deps = &.{"thermite"} },
         .{ .name = "hypercube-thermite", .path = "examples/thermite/hypercube-thermite.zig", .deps = &.{"thermite"} },
+        // ASCII shape rendering experiments
+        .{ .name = "ascii-cube", .path = "examples/ascii-cube.zig", .deps = &.{"thermite"} },
     };
 
     // Module lookup table
