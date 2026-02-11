@@ -1,7 +1,6 @@
 const std = @import("std");
 const app = @import("app");
 
-const Cmd = app.Cmd;
 const Effect = app.Effect;
 const Size = app.Size;
 const Ui = app.Ui;
@@ -100,7 +99,7 @@ const repl_config = Repl.MsgConfig(Msg){
 // Update - state transitions
 // ─────────────────────────────────────────────────────────────
 
-pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
+pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Effect(Msg) {
     _ = allocator;
 
     switch (msg) {
@@ -111,9 +110,8 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
             // Record key to keytester for debugging
             model.keytester.recordKey(key);
 
-            // Use Effect-based API
-            const effect = model.repl.handleKeyEffect(key, Msg, repl_config) catch return .none;
-            return processEffectToCmd(effect, model);
+            // Use Effect-based API - returns Effect directly now
+            return model.repl.handleKeyEffect(key, Msg, repl_config) catch .none;
         },
         .tick => {},
 
@@ -141,26 +139,7 @@ pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) Cmd {
     return .none;
 }
 
-/// Convert Effect to Cmd (bridge until runtime fully supports Effect)
-fn processEffectToCmd(effect: Effect(Msg), model: *Model) Cmd {
-    switch (effect) {
-        .none => return .none,
-        .quit => return .quit,
-        .dispatch => |msg| {
-            return update(model, msg, model.allocator);
-        },
-        .after => return .none, // Cursor handled by view
-        .batch => |effects| {
-            for (effects) |e| {
-                const result = processEffectToCmd(e, model);
-                if (result == .quit) return .quit;
-            }
-            return .none;
-        },
-    }
-}
-
-fn handleCommand(model: *Model, text: []const u8) Cmd {
+fn handleCommand(model: *Model, text: []const u8) Effect(Msg) {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
 
     if (std.mem.eql(u8, trimmed, "clear")) {

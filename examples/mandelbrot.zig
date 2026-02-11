@@ -124,7 +124,7 @@ pub fn init() Model {
     return .{ .fps_last_time = std.time.milliTimestamp() };
 }
 
-pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Cmd {
+pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Effect(Msg) {
     switch (msg) {
         .tick => |_| {
             if (model.is_paused) return .none;
