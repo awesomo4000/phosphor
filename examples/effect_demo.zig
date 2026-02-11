@@ -190,7 +190,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     try app.App(@This()).run(gpa.allocator(), .{
-        .backend = .thermite,
+        .backend = .thermite_threaded,
         .target_fps = 30,
     });
 }

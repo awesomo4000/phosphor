@@ -10,6 +10,7 @@ pub const SHOW_CURSOR = "\x1b[?25h";
 pub const RESET_ALL = "\x1b[0m";
 pub const ENTER_ALT_SCREEN = "\x1b[?1049h";
 pub const EXIT_ALT_SCREEN = "\x1b[?1049l";
+pub const DEVICE_STATUS_REPORT = "\x1b[5n"; // Terminal responds with \x1b[0n
 
 pub const TerminalInfo = struct {
     fd: i32,
@@ -27,6 +28,7 @@ var original_termios: ?termios = null;
 // Module-level state for signal handler access
 var terminal_fd: ?i32 = null;
 var resize_pending: bool = false;
+var cont_pending: bool = false;
 
 pub fn getTerminalInfo() !TerminalInfo {
     const timer = @import("startup_timer");
@@ -86,25 +88,26 @@ pub fn enterRawMode(fd: i32) !void {
     tios.iflag.ICRNL = false; // Don't translate CR to NL
     tios.oflag.OPOST = false; // Disable output processing
 
-    // Set minimum characters and timeout
-    tios.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    tios.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+    // Set minimum characters and timeout for BLOCKING reads:
+    // VMIN=1: read() blocks until at least 1 character is available
+    // VTIME=0: no timeout (pure blocking like libvaxis)
+    tios.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+    tios.cc[@intFromEnum(std.posix.V.TIME)] = 0;
 
     timer.mark("  enterRawMode: tcsetattr FLUSH start");
     _ = try std.posix.tcsetattr(fd, .FLUSH, tios);
     timer.mark("  enterRawMode: tcsetattr FLUSH done");
 
-    // Enter alternate screen buffer - gives us a clean slate and
-    // tells the terminal this is a full-screen app (may improve resize behavior)
-    _ = try std.posix.write(fd, ENTER_ALT_SCREEN);
+    // All terminal setup sequences combined into ONE atomic write
+    // This prevents race conditions with concurrent input thread polling
+    const setup_sequence = ENTER_ALT_SCREEN // Enter alternate screen buffer
+    ++ "\x1b[?7l" // Disable auto-wrap mode (DECAWM)
+    ++ HIDE_CURSOR // Hide cursor during rendering
+    ++ CLEAR_SCREEN // Clear screen
+    ++ CURSOR_HOME; // Home cursor
 
-    // Disable auto-wrap mode (DECAWM) - prevents unexpected wrapping when writing
-    // to the last column. We use explicit cursor positioning instead.
-    _ = try std.posix.write(fd, "\x1b[?7l");
-
-    // NOTE: Don't enable sync output mode here - it buffers subsequent writes
-    // (hideCursor, clearScreen) until the end marker is sent. Instead, sync
-    // mode is enabled/disabled per-frame in renderDifferential().
+    _ = try std.posix.write(fd, setup_sequence);
+    timer.mark("  enterRawMode: setup sequence written");
 }
 
 pub fn exitRawMode(fd: i32) !void {
@@ -112,14 +115,24 @@ pub fn exitRawMode(fd: i32) !void {
         return;
     }
 
-    // Disable synchronized output mode
+    // Thorough cleanup sequence to ensure terminal is in good state:
+    // 1. Reset all attributes (colors, bold, etc.)
+    _ = std.posix.write(fd, RESET_ALL) catch {};
+
+    // 2. Disable synchronized output mode (in case we're mid-frame)
     _ = std.posix.write(fd, "\x1b[?2026l") catch {};
 
-    // Re-enable auto-wrap mode
+    // 3. Re-enable auto-wrap mode (we disabled it on entry)
     _ = std.posix.write(fd, "\x1b[?7h") catch {};
 
-    // Exit alternate screen buffer - restores main screen
+    // 4. Show cursor (in case it was hidden)
+    _ = std.posix.write(fd, SHOW_CURSOR) catch {};
+
+    // 5. Exit alternate screen buffer - restores main screen
     _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
+
+    // 6. Reset attributes again after exiting alt screen (main screen state)
+    _ = std.posix.write(fd, RESET_ALL) catch {};
 
     if (original_termios) |tios| {
         _ = try std.posix.tcsetattr(fd, .FLUSH, tios);
@@ -317,6 +330,68 @@ pub fn readKeyEvent(fd: i32) ?Key {
     return parseKeySequence(buf[0..total]);
 }
 
+/// Result of parsing a key from a byte buffer
+pub const ParseResult = struct {
+    key: Key,
+    bytes_consumed: usize,
+};
+
+/// Parse a key from a byte buffer, returning the key and bytes consumed.
+/// Used for blocking read where we read multiple bytes at once.
+pub fn parseKeyFromBytes(buf: []const u8) ?ParseResult {
+    if (buf.len == 0) return null;
+
+    const first = buf[0];
+
+    // Escape sequence - need to determine length
+    if (first == 0x1b) {
+        if (buf.len == 1) return .{ .key = .escape, .bytes_consumed = 1 };
+
+        // CSI sequences: ESC [
+        if (buf.len >= 2 and buf[1] == '[') {
+            const csi_len = findCSILength(buf[2..]);
+            const total_len = 2 + csi_len;
+            if (parseKeySequence(buf[0..total_len])) |key| {
+                return .{ .key = key, .bytes_consumed = total_len };
+            }
+            return .{ .key = .escape, .bytes_consumed = 1 };
+        }
+
+        // SS3 sequences: ESC O
+        if (buf.len >= 3 and buf[1] == 'O') {
+            if (parseKeySequence(buf[0..3])) |key| {
+                return .{ .key = key, .bytes_consumed = 3 };
+            }
+        }
+
+        // Alt+key: ESC followed by another char
+        if (buf.len >= 2) {
+            if (parseKeySequence(buf[0..2])) |key| {
+                return .{ .key = key, .bytes_consumed = 2 };
+            }
+        }
+
+        return .{ .key = .escape, .bytes_consumed = 1 };
+    }
+
+    // Single byte - control char or printable
+    if (parseKeySequence(buf[0..1])) |key| {
+        return .{ .key = key, .bytes_consumed = 1 };
+    }
+    return null;
+}
+
+/// Find the length of a CSI sequence (after ESC [)
+fn findCSILength(buf: []const u8) usize {
+    // CSI sequences end with a letter (0x40-0x7E)
+    for (buf, 0..) |c, i| {
+        if (c >= 0x40 and c <= 0x7E) {
+            return i + 1;
+        }
+    }
+    return buf.len; // Incomplete sequence, consume what we have
+}
+
 /// Parse a key sequence into a Key event
 fn parseKeySequence(seq: []const u8) ?Key {
     if (seq.len == 0) return null;
@@ -487,6 +562,11 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     resize_pending = true;
 }
 
+/// SIGCONT handler - process resumed after stop (signal-safe)
+fn handleSigcont(_: c_int) callconv(.c) void {
+    cont_pending = true;
+}
+
 /// Cleanup signal handler - restores terminal state AND re-raises signal
 fn handleCleanupSignal(sig: c_int) callconv(.c) void {
     if (terminal_fd) |fd| {
@@ -534,12 +614,30 @@ pub fn installSignalHandlers(fd: i32) void {
     _ = std.posix.sigaction(std.posix.SIG.INT, &cleanup_act, null);
     _ = std.posix.sigaction(std.posix.SIG.TERM, &cleanup_act, null);
     _ = std.posix.sigaction(std.posix.SIG.HUP, &cleanup_act, null);
+
+    // SIGCONT - process resumed after being stopped
+    var cont_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigcont },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.posix.sigaction(std.posix.SIG.CONT, &cont_act, null);
 }
 
 /// Check if resize is pending without clearing the flag
 /// Use this to skip rendering when another resize is imminent
 pub fn isResizePending() bool {
     return resize_pending;
+}
+
+/// Check if process was resumed after being stopped (SIGCONT received).
+/// Clears the flag after checking. Caller should re-enter raw mode and redraw.
+pub fn checkContinue() bool {
+    if (cont_pending) {
+        cont_pending = false;
+        return true;
+    }
+    return false;
 }
 
 /// Query current terminal size directly (for validation before output)
@@ -589,7 +687,8 @@ pub fn checkResize(fd: i32) ?struct { width: u32, height: u32 } {
 
 pub const PollResult = enum { ready, timeout, resize };
 
-/// Poll for input with timeout, handles EINTR from signals
+/// Poll for input with timeout, handles EINTR from signals.
+/// Use timeout_ms = -1 for infinite blocking (preferred for input threads).
 pub fn pollInput(fd: i32, timeout_ms: i32) !PollResult {
     var pfd = [_]std.posix.pollfd{.{
         .fd = fd,
@@ -609,4 +708,11 @@ pub fn pollInput(fd: i32, timeout_ms: i32) !PollResult {
     if (ready > 0) return .ready;
     if (resize_pending) return .resize;
     return .timeout;
+}
+
+/// Wake up a thread that's blocked on pollInput() by sending a Device Status Report.
+/// The terminal will respond with \x1b[0n, which unblocks the read.
+/// Call this before joining an input thread that uses blocking poll.
+pub fn wakeReader(fd: i32) void {
+    _ = std.posix.write(fd, DEVICE_STATUS_REPORT) catch {};
 }

@@ -3,6 +3,9 @@ const Allocator = std.mem.Allocator;
 const thermite = @import("thermite");
 const phosphor = @import("phosphor");
 
+// Runtime queue for threaded input
+const Queue = phosphor.runtime.Queue;
+
 // Re-export phosphor types for text-based apps
 pub const DrawCommand = phosphor.DrawCommand;
 pub const LayoutNode = phosphor.LayoutNode;
@@ -19,6 +22,8 @@ pub const Key = thermite.terminal.Key;
 pub const Backend = enum {
     simple,
     thermite,
+    /// Thermite with threaded input (queue-based)
+    thermite_threaded,
 };
 
 /// Options for App.run()
@@ -540,6 +545,10 @@ pub fn App(comptime Module: type) type {
     return struct {
         /// Run the app with options
         pub fn run(allocator: Allocator, options: RunOptions) !void {
+            // Initialize unicode display width tables (used by widgets for text measurement)
+            try phosphor.unicode.init(allocator);
+            defer phosphor.unicode.deinit(allocator);
+
             var model = if (init_takes_allocator)
                 Module.init(allocator)
             else
@@ -559,6 +568,7 @@ pub fn App(comptime Module: type) type {
             return switch (options.backend) {
                 .simple => runSimple(allocator, &model, options),
                 .thermite => runThermite(allocator, &model, options),
+                .thermite_threaded => runThermiteThreaded(allocator, &model, options),
             };
         }
 
@@ -837,6 +847,213 @@ pub fn App(comptime Module: type) type {
                     const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
                         std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                    }
+                }
+            }
+        }
+
+        /// Run with thermite backend + threaded input (queue-based)
+        fn runThermiteThreaded(allocator: Allocator, model: *Model, options: RunOptions) !void {
+            // Frame arena for view nodes
+            var frame_arena = std.heap.ArenaAllocator.init(allocator);
+            defer frame_arena.deinit();
+
+            // Initialize thermite renderer
+            const renderer = try thermite.Renderer.init(allocator);
+            defer renderer.deinit();
+
+            // Install signal handlers (SIGINT cleanup + SIGWINCH resize)
+            thermite.terminal.installSignalHandlers(renderer.getTerminalFd());
+
+            // Message queue for threaded input
+            var queue = Queue(Msg).init(allocator);
+            defer queue.deinit();
+
+            // Shared state for input thread
+            var running = std.atomic.Value(bool).init(true);
+            const term_fd = renderer.getTerminalFd();
+
+            // Start input thread - uses blocking poll so it won't interfere with writes
+            const input_thread = try std.Thread.spawn(.{}, inputThreadFn, .{
+                &queue,
+                &running,
+                term_fd,
+            });
+            defer {
+                running.store(false, .release);
+                // Wake the blocking poll by sending DSR - terminal responds, unblocking read
+                thermite.terminal.wakeReader(term_fd);
+                input_thread.join();
+            }
+
+            // UI builder using frame arena
+            var ui = Ui{ .ally = frame_arena.allocator() };
+
+            // Timing
+            var last_frame = std.time.milliTimestamp();
+
+            // Build initial view to detect type (layout vs canvas)
+            var root = Module.view(model, &ui);
+
+            // Send initial resize
+            const is_layout = findLayoutRef(root) != null;
+            const initial_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
+            const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
+            if (executeCmd(Module.update(model, msgFromResize(Msg, initial_width, initial_height), allocator))) return;
+
+            // Rebuild view with correct dimensions
+            _ = frame_arena.reset(.retain_capacity);
+            ui.ally = frame_arena.allocator();
+            root = Module.view(model, &ui);
+
+            // Message buffer for draining queue
+            var msg_buf: [64]Msg = undefined;
+
+            // Event loop
+            while (running.load(.acquire)) {
+                // Drain and process all queued messages
+                const messages = queue.drain(&msg_buf);
+                for (messages) |msg| {
+                    if (executeCmd(Module.update(model, msg, allocator))) {
+                        return;
+                    }
+                }
+
+                // Check if resumed from SIGSTOP/SIGTSTP - restore terminal state
+                if (thermite.terminal.checkContinue()) {
+                    thermite.terminal.enterRawMode(renderer.ttyfd) catch {};
+                    renderer.forceFullRedraw();
+                }
+
+                // Check for terminal resize
+                const actual_size = thermite.terminal.getCurrentSize(renderer.ttyfd);
+                const size_changed = if (actual_size) |actual|
+                    actual.width != renderer.term_width or actual.height != renderer.term_height
+                else
+                    renderer.checkResize() != null;
+
+                if (size_changed) {
+                    if (actual_size) |actual| {
+                        renderer.resize(actual.width, actual.height) catch {};
+                    }
+                    if (@hasField(Msg, "resize")) {
+                        const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
+                        const new_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
+                        const msg = @unionInit(Msg, "resize", Size{ .w = new_width, .h = new_height });
+                        if (executeCmd(Module.update(model, msg, allocator))) return;
+                    }
+                }
+
+                // Update timing
+                const now = std.time.milliTimestamp();
+                const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
+                last_frame = now;
+
+                // Send tick if animating
+                const subs = Module.subs(model);
+                if (subs.animation_frame) {
+                    if (msgFromTick(Msg, dt)) |msg| {
+                        if (executeCmd(Module.update(model, msg, allocator))) return;
+                    }
+                }
+
+                // Reset frame arena, rebuild view
+                _ = frame_arena.reset(.retain_capacity);
+                ui.ally = frame_arena.allocator();
+                root = Module.view(model, &ui);
+
+                // Render (same as runThermite)
+                if (findCanvasRef(root)) |ref| {
+                    if (ref.render_fn) |render_fn| {
+                        render_fn(ref.render_ctx);
+                    }
+                    try renderer.setPixels(ref.pixels.*, ref.width.*, ref.height.*);
+                    try renderer.presentOptimized();
+
+                    if (ref.overlay_text) |text| {
+                        drawOverlayText(renderer.ttyfd, renderer.term_width, renderer.term_height, text);
+                    }
+                } else if (findLayoutRef(root)) |ref| {
+                    renderer.clearBackBuffer();
+
+                    const bounds = Rect{
+                        .x = 0,
+                        .y = 0,
+                        .w = @intCast(renderer.term_width),
+                        .h = @intCast(renderer.term_height),
+                    };
+
+                    const render_result = try renderTreeWithPositions(ref.node, bounds, frame_arena.allocator());
+                    executeDrawCommands(renderer, render_result.commands);
+
+                    if (thermite.terminal.getCurrentSize(renderer.ttyfd)) |current| {
+                        if (current.width != renderer.term_width or current.height != renderer.term_height) {
+                            continue;
+                        }
+                    }
+
+                    try renderer.renderDifferential();
+
+                    if (findCursorInCommands(render_result.commands)) |cursor| {
+                        var pos_buf: [32]u8 = undefined;
+                        const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cursor.y + 1, cursor.x + 1 }) catch continue;
+                        _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                    } else if (ref.cursor_x) |cx| {
+                        if (ref.cursor_y) |cy| {
+                            var pos_buf: [32]u8 = undefined;
+                            const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cy + 1, cx + 1 }) catch continue;
+                            _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                        }
+                    }
+
+                    _ = render_result.widget_positions;
+                }
+
+                // Frame pacing
+                if (subs.animation_frame) {
+                    const frame_time = std.time.milliTimestamp() - now;
+                    const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
+                    if (frame_time < target) {
+                        std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                    }
+                } else {
+                    // When not animating, sleep a bit to avoid busy-waiting
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                }
+            }
+        }
+
+        /// Input thread function - reads keys and pushes to queue.
+        /// Uses blocking read for efficiency. Thread is woken via Device
+        /// Status Report when it's time to shut down.
+        fn inputThreadFn(
+            queue: *Queue(Msg),
+            running: *std.atomic.Value(bool),
+            term_fd: i32,
+        ) void {
+            // Use blocking read like libvaxis - no poll() at all
+            var buf: [64]u8 = undefined;
+            while (running.load(.acquire)) {
+                // Blocking read - sleeps until input arrives
+                const n = std.posix.read(term_fd, &buf) catch |err| {
+                    if (err == error.Interrupted) continue; // Signal, retry
+                    break; // Other error, exit
+                };
+                if (n == 0) continue; // No data (shouldn't happen with blocking read)
+
+                // Check running - we might have been woken by DSR for shutdown
+                if (!running.load(.acquire)) break;
+
+                // Parse the input bytes into key events
+                var i: usize = 0;
+                while (i < n) {
+                    if (thermite.terminal.parseKeyFromBytes(buf[i..n])) |result| {
+                        if (@hasField(Msg, "key")) {
+                            queue.push(@unionInit(Msg, "key", result.key));
+                        }
+                        i += result.bytes_consumed;
+                    } else {
+                        i += 1; // Skip unparseable byte
                     }
                 }
             }

@@ -23,10 +23,13 @@ pub const TerminalBackend = backend.TerminalBackend;
 pub const MemoryBackend = backend.MemoryBackend;
 pub const ThermiteBackend = backend.ThermiteBackend;
 
-// Runtime (event loop)
-pub const runtime = @import("runtime.zig");
-pub const Runtime = runtime.Runtime;
-pub const Widget = runtime.Widget;
+// Old runtime (event loop) - to be replaced
+pub const runtime_old = @import("runtime.zig");
+pub const RuntimeOld = runtime_old.Runtime;
+pub const Widget = runtime_old.Widget;
+
+// New runtime (queue-based architecture)
+pub const runtime = @import("runtime/root.zig");
 
 // Elm-style Application
 pub const application = @import("application.zig");
@@ -70,8 +73,30 @@ pub const capabilities = thermite_mod.capabilities;
 pub const Capabilities = thermite_mod.Capabilities;
 pub const detectCapabilities = capabilities.detectFromEnv;
 
+// Unicode text utilities (display width calculation)
+pub const unicode = @import("unicode");
+
+/// Returns the display width of a string in terminal columns.
+/// Handles grapheme clusters correctly (emoji ZWJ sequences, combining marks, CJK, etc.).
+///
+/// Examples:
+///   unicodeWidth("Hello")        // 5
+///   unicodeWidth("Hello 😊")     // 8  (emoji is width 2)
+///   unicodeWidth("👨‍👩‍👧")           // 2  (family emoji ZWJ sequence)
+///   unicodeWidth("你好")          // 4  (CJK, each char width 2)
+///
+/// Note: Automatically initialized by the runtime. If called before runtime init,
+/// falls back to byte length (incorrect for non-ASCII, but won't crash).
+pub const unicodeWidth = unicode.strWidth;
+
 // Debug utilities
 pub const startup_timer = @import("startup_timer");
 
 // Version info
 pub const version = "0.1.0";
+
+test {
+    // Pull in tests from submodules
+    @import("std").testing.refAllDecls(@This());
+    _ = runtime;
+}

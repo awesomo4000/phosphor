@@ -36,7 +36,8 @@ const Model = struct {
         const keytester = KeyTester.init(allocator);
 
         // Welcome messages
-        log.append("Welcome to Phosphor REPL Demo!") catch {};
+        const pid = std.c.getpid();
+        log.print("Welcome to Phosphor REPL Demo! (pid: {})", .{pid}) catch {};
         log.append("Commands: help, clear, history, exit") catch {};
         log.append("Keys: Ctrl+O newline | Ctrl+C cancel | Ctrl+D exit") catch {};
         log.append("") catch {};
@@ -247,7 +248,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     try app.App(@This()).run(gpa.allocator(), .{
-        .backend = .thermite,
+        .backend = .thermite_threaded,
         .target_fps = 30, // REPL doesn't need high fps
     });
 }

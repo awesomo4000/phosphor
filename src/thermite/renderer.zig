@@ -62,15 +62,9 @@ pub const Renderer = struct {
             .caps = caps,
         };
 
-        // Initialize terminal
+        // Initialize terminal (includes alt screen, hide cursor, clear - all atomic)
         try terminal.enterRawMode(renderer.ttyfd);
         timer.mark("enterRawMode() done");
-
-        try terminal.hideCursor(renderer.ttyfd);
-        timer.mark("hideCursor() done");
-
-        try terminal.clearScreen(renderer.ttyfd);
-        timer.mark("clearScreen() done");
 
         // Initialize buffers - use explicit black for terminals that don't handle transparent
         if (caps.terminal == .apple_terminal or
@@ -89,14 +83,7 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(self: *Renderer) void {
-        // Restore terminal state
-        terminal.resetColors(self.ttyfd) catch {};
-        terminal.showCursor(self.ttyfd) catch {};
-        // Move cursor to bottom of screen so user's terminal isn't cluttered
-        // Don't clear screen - user may want to see what was displayed
-        var buf: [32]u8 = undefined;
-        const seq = std.fmt.bufPrint(&buf, "\x1b[{};1H\n", .{self.term_height}) catch "";
-        _ = std.posix.write(self.ttyfd, seq) catch {};
+        // exitRawMode handles all terminal cleanup (reset, cursor, alt screen exit)
         terminal.exitRawMode(self.ttyfd) catch {};
 
         self.front_plane.deinit();
@@ -495,6 +482,12 @@ pub const Renderer = struct {
 
         // Clear screen to avoid artifacts
         try terminal.clearScreen(self.ttyfd);
+    }
+
+    /// Force a full redraw on next render (used after SIGCONT)
+    pub fn forceFullRedraw(self: *Renderer) void {
+        self.first_frame = true;
+        self.force_full_render = true;
     }
 };
 

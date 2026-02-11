@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // External dependencies
+    const zg_dep = b.dependency("zg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Startup timer module (debug timing utility)
     const startup_timer = b.addModule("startup_timer", .{
         .root_source_file = b.path("src/startup_timer.zig"),
@@ -19,6 +25,14 @@ pub fn build(b: *std.Build) void {
     });
     thermite.addImport("startup_timer", startup_timer);
 
+    // Unicode module (display width calculation using zg)
+    const unicode = b.addModule("unicode", .{
+        .root_source_file = b.path("src/unicode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    unicode.addImport("zg", zg_dep.module("DisplayWidth"));
+
     // Phosphor module (high-level TUI framework)
     const phosphor = b.addModule("phosphor", .{
         .root_source_file = b.path("src/phosphor.zig"),
@@ -27,6 +41,7 @@ pub fn build(b: *std.Build) void {
     });
     phosphor.addImport("thermite", thermite);
     phosphor.addImport("startup_timer", startup_timer);
+    phosphor.addImport("unicode", unicode);
 
     // Repl module (readline-style input widget) - depends on phosphor for render_commands
     const repl = b.addModule("repl", .{
@@ -91,6 +106,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]Example{
         .{ .name = "repl-demo", .path = "examples/repl_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview", "keytester" } },
         .{ .name = "effect-demo", .path = "examples/effect_demo.zig", .deps = &.{ "app", "phosphor", "repl", "logview" } },
+        .{ .name = "runtime-demo", .path = "examples/runtime_demo.zig", .deps = &.{"phosphor"} },
         // App architecture demos (Elm-style)
         .{ .name = "mandelbrot", .path = "examples/mandelbrot.zig", .deps = &.{"app"} },
         .{ .name = "sprites", .path = "examples/sprites.zig", .deps = &.{"app"} },
@@ -196,4 +212,16 @@ pub fn build(b: *std.Build) void {
         .root_module = layout_test_mod,
     });
     test_step.dependOn(&b.addRunArtifact(layout_tests).step);
+
+    // Phosphor tests (pulls in runtime tests via refAllDecls)
+    const phosphor_tests = b.addTest(.{
+        .root_module = phosphor,
+    });
+    test_step.dependOn(&b.addRunArtifact(phosphor_tests).step);
+
+    // Unicode module tests
+    const unicode_tests = b.addTest(.{
+        .root_module = unicode,
+    });
+    test_step.dependOn(&b.addRunArtifact(unicode_tests).step);
 }
