@@ -900,11 +900,19 @@ pub fn App(comptime Module: type) type {
             // Build initial view to detect type (layout vs canvas)
             var root = Module.view(model, &ui);
 
-            // Send initial resize
+            // Detect view type
             const is_layout = findLayoutRef(root) != null;
             const initial_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
             const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
-            if (shouldQuit(callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator), model, allocator)) return;
+
+            // Effects list - reused each frame
+            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .{};
+            defer effects.deinit(allocator);
+
+            // Send initial resize
+            effects.append(allocator, callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator)) catch {};
+            var after_paint: ?Effect(Msg).AfterPaint = null;
+            if (processEffects(&effects, model, allocator, &after_paint)) return;
 
             // Rebuild view with correct dimensions
             _ = frame_arena.reset(.retain_capacity);
@@ -916,12 +924,14 @@ pub fn App(comptime Module: type) type {
 
             // Event loop
             while (running.load(.acquire)) {
-                // Drain and process all queued messages
+                // Clear effects for this frame
+                effects.clearRetainingCapacity();
+                after_paint = null;
+
+                // 1. Collect effects from queued messages
                 const messages = queue.drain(&msg_buf);
                 for (messages) |msg| {
-                    if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) {
-                        return;
-                    }
+                    effects.append(allocator, callUpdate(model, msg, allocator)) catch {};
                 }
 
                 // Check if resumed from SIGSTOP/SIGTSTP - restore terminal state
@@ -930,7 +940,7 @@ pub fn App(comptime Module: type) type {
                     renderer.forceFullRedraw();
                 }
 
-                // Check for terminal resize
+                // 2. Collect effect from resize if needed
                 const actual_size = thermite.terminal.getCurrentSize(renderer.ttyfd);
                 const size_changed = if (actual_size) |actual|
                     actual.width != renderer.term_width or actual.height != renderer.term_height
@@ -945,7 +955,7 @@ pub fn App(comptime Module: type) type {
                         const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
                         const new_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
                         const msg = @unionInit(Msg, "resize", Size{ .w = new_width, .h = new_height });
-                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
+                        effects.append(allocator, callUpdate(model, msg, allocator)) catch {};
                     }
                 }
 
@@ -954,12 +964,17 @@ pub fn App(comptime Module: type) type {
                 const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
                 last_frame = now;
 
-                // Send tick if animating
+                // 3. Collect effect from tick if animating
                 const subs = Module.subs(model);
                 if (subs.animation_frame) {
                     if (msgFromTick(Msg, dt)) |msg| {
-                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
+                        effects.append(allocator, callUpdate(model, msg, allocator)) catch {};
                     }
+                }
+
+                // 4. Process ALL effects centrally
+                if (processEffects(&effects, model, allocator, &after_paint)) {
+                    return; // quit
                 }
 
                 // Reset frame arena, rebuild view
@@ -1218,21 +1233,47 @@ pub fn App(comptime Module: type) type {
             }
         }
 
-        /// Process effect and check if it indicates quit
-        /// Handles .dispatch by recursively calling update
+        /// Centralized effect processor
+        /// Processes all effects, handling .dispatch by queuing more effects
+        /// Returns true if app should quit
+        fn processEffects(
+            effects: *std.ArrayListUnmanaged(Effect(Msg)),
+            model: *Model,
+            allocator: Allocator,
+            after_paint: *?Effect(Msg).AfterPaint,
+        ) bool {
+            var i: usize = 0;
+            while (i < effects.items.len) : (i += 1) {
+                switch (effects.items[i]) {
+                    .none => {},
+                    .quit => return true,
+                    .dispatch => |msg| {
+                        // Process dispatched message, append resulting effect
+                        const new_effect = callUpdate(model, msg, allocator);
+                        effects.append(allocator, new_effect) catch {};
+                    },
+                    .after => |ap| {
+                        // Collect for post-paint execution
+                        after_paint.* = ap;
+                    },
+                    .batch => |batch| {
+                        // Flatten batch into effect list
+                        for (batch) |e| {
+                            effects.append(allocator, e) catch {};
+                        }
+                    },
+                }
+            }
+            return false;
+        }
+
+        /// Legacy helper for simpler runtimes that don't need full effect processing
         fn shouldQuit(effect: Effect(Msg), model: *Model, allocator: Allocator) bool {
-            return switch (effect) {
-                .none => false,
-                .quit => true,
-                .dispatch => |msg| shouldQuit(callUpdate(model, msg, allocator), model, allocator),
-                .after => false, // After-paint effects don't quit
-                .batch => |effects| blk: {
-                    for (effects) |e| {
-                        if (shouldQuit(e, model, allocator)) break :blk true;
-                    }
-                    break :blk false;
-                },
-            };
+            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .{};
+            defer effects.deinit(allocator);
+            effects.append(allocator, effect) catch return false;
+            var after_paint: ?Effect(Msg).AfterPaint = null;
+            return processEffects(&effects, model, allocator, &after_paint);
         }
 
         /// Convert legacy Cmd to Effect(Msg)
