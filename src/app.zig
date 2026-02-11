@@ -598,7 +598,7 @@ pub fn App(comptime Module: type) type {
             var last_frame = std.time.milliTimestamp();
 
             // Send initial resize
-            if (shouldQuit(callUpdate(model, msgFromResize(Msg, term.width, term.height), allocator))) return;
+            if (shouldQuit(callUpdate(model, msgFromResize(Msg, term.width, term.height), allocator), model, allocator)) return;
 
             // Build initial view
             var root = Module.view(model, &ui);
@@ -618,7 +618,7 @@ pub fn App(comptime Module: type) type {
                     screen.resize(allocator, resize_event.resize.w, resize_event.resize.h) catch {};
                     // Send resize message to model
                     if (msgFromEvent(Msg, resize_event)) |msg| {
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -630,15 +630,15 @@ pub fn App(comptime Module: type) type {
                             if (findKeyHandler(root)) |handler| {
                                 const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                                 const msg = typed_handler(key);
-                                if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                                if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                             } else if (msgFromEvent(Msg, event)) |msg| {
                                 // Fall back to direct event
-                                if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                                if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                             }
                         },
                         else => {
                             if (msgFromEvent(Msg, event)) |msg| {
-                                if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                                if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                             }
                         },
                     }
@@ -652,7 +652,7 @@ pub fn App(comptime Module: type) type {
                 // Send tick if animating
                 if (subs.animation_frame) {
                     if (msgFromTick(Msg, dt)) |msg| {
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -707,7 +707,7 @@ pub fn App(comptime Module: type) type {
             const is_layout = findLayoutRef(root) != null;
             const initial_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
             const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
-            if (shouldQuit(callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator))) return;
+            if (shouldQuit(callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator), model, allocator)) return;
 
             // Rebuild view with correct dimensions
             _ = frame_arena.reset(.retain_capacity);
@@ -726,9 +726,9 @@ pub fn App(comptime Module: type) type {
                     if (thermite.terminal.readKeyEvent(term_fd)) |key| {
                         if (findKeyHandler(root)) |handler| {
                             const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
-                            if (shouldQuit(callUpdate(model, typed_handler(key), allocator))) return;
+                            if (shouldQuit(callUpdate(model, typed_handler(key), allocator), model, allocator)) return;
                         } else if (@hasField(Msg, "key")) {
-                            if (shouldQuit(callUpdate(model, @unionInit(Msg, "key", key), allocator))) return;
+                            if (shouldQuit(callUpdate(model, @unionInit(Msg, "key", key), allocator), model, allocator)) return;
                         }
                     }
                 } else {
@@ -738,9 +738,9 @@ pub fn App(comptime Module: type) type {
                             if (thermite.terminal.readKeyEvent(term_fd)) |key| {
                                 if (findKeyHandler(root)) |handler| {
                                     const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
-                                    if (shouldQuit(callUpdate(model, typed_handler(key), allocator))) return;
+                                    if (shouldQuit(callUpdate(model, typed_handler(key), allocator), model, allocator)) return;
                                 } else if (@hasField(Msg, "key")) {
-                                    if (shouldQuit(callUpdate(model, @unionInit(Msg, "key", key), allocator))) return;
+                                    if (shouldQuit(callUpdate(model, @unionInit(Msg, "key", key), allocator), model, allocator)) return;
                                 }
                             }
                         },
@@ -765,7 +765,7 @@ pub fn App(comptime Module: type) type {
                         const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
                         const new_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
                         const msg = @unionInit(Msg, "resize", Size{ .w = new_width, .h = new_height });
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -777,7 +777,7 @@ pub fn App(comptime Module: type) type {
                 // Send tick if animating
                 if (subs.animation_frame) {
                     if (msgFromTick(Msg, dt)) |msg| {
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -904,7 +904,7 @@ pub fn App(comptime Module: type) type {
             const is_layout = findLayoutRef(root) != null;
             const initial_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
             const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
-            if (shouldQuit(callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator))) return;
+            if (shouldQuit(callUpdate(model, msgFromResize(Msg, initial_width, initial_height), allocator), model, allocator)) return;
 
             // Rebuild view with correct dimensions
             _ = frame_arena.reset(.retain_capacity);
@@ -919,7 +919,7 @@ pub fn App(comptime Module: type) type {
                 // Drain and process all queued messages
                 const messages = queue.drain(&msg_buf);
                 for (messages) |msg| {
-                    if (shouldQuit(callUpdate(model, msg, allocator))) {
+                    if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) {
                         return;
                     }
                 }
@@ -945,7 +945,7 @@ pub fn App(comptime Module: type) type {
                         const new_width: u32 = if (is_layout) renderer.term_width else renderer.term_width * 2;
                         const new_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
                         const msg = @unionInit(Msg, "resize", Size{ .w = new_width, .h = new_height });
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -958,7 +958,7 @@ pub fn App(comptime Module: type) type {
                 const subs = Module.subs(model);
                 if (subs.animation_frame) {
                     if (msgFromTick(Msg, dt)) |msg| {
-                        if (shouldQuit(callUpdate(model, msg, allocator))) return;
+                        if (shouldQuit(callUpdate(model, msg, allocator), model, allocator)) return;
                     }
                 }
 
@@ -1218,9 +1218,21 @@ pub fn App(comptime Module: type) type {
             }
         }
 
-        /// Check if effect indicates quit
-        fn shouldQuit(effect: Effect(Msg)) bool {
-            return effect == .quit;
+        /// Process effect and check if it indicates quit
+        /// Handles .dispatch by recursively calling update
+        fn shouldQuit(effect: Effect(Msg), model: *Model, allocator: Allocator) bool {
+            return switch (effect) {
+                .none => false,
+                .quit => true,
+                .dispatch => |msg| shouldQuit(callUpdate(model, msg, allocator), model, allocator),
+                .after => false, // After-paint effects don't quit
+                .batch => |effects| blk: {
+                    for (effects) |e| {
+                        if (shouldQuit(e, model, allocator)) break :blk true;
+                    }
+                    break :blk false;
+                },
+            };
         }
 
         /// Convert legacy Cmd to Effect(Msg)
