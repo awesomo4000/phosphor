@@ -255,10 +255,10 @@ pub const LocalWidgetVTable = struct {
 
 ## Migration TODO
 
-### Phase 1: Effect System (isolated, low risk)
-1. [ ] **Migrate update() return** - from `Cmd` to `Effect(Msg)` in app.zig runtime
-2. [ ] **Update repl_demo** - use Effect instead of Cmd
-3. [ ] **Update other demos** - mandelbrot, sprites, hypercube
+### Phase 1: Effect System (isolated, low risk) ✓
+1. [x] **Migrate update() return** - from `Cmd` to `Effect(Msg)` in app.zig runtime
+2. [x] **Update repl_demo** - use Effect instead of Cmd
+3. [x] **Update other demos** - mandelbrot, sprites, hypercube
 
 ### Phase 2: Subscriptions (isolated, low risk)
 4. [ ] **Migrate subs() return** - from bool struct to `Subs(Msg)`
