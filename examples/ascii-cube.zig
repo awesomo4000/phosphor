@@ -1190,28 +1190,27 @@ const hypercube_faces = generateHypercubeFaces();
 
 const RenderMode = enum { cube, hypercube, sphere };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Terminal setup
-    const term_info = try thermite.terminal.getTerminalInfo();
+    const term_info = try thermite.terminal.getTerminalInfo(io);
     const fd = term_info.fd;
     const width: usize = term_info.width;
     const height: usize = term_info.height - 2; // Leave room for status
 
-    try thermite.terminal.enterRawMode(fd);
-    defer thermite.terminal.exitRawMode(fd) catch {};
-    try thermite.terminal.hideCursor(fd);
-    defer thermite.terminal.showCursor(fd) catch {};
+    try thermite.terminal.enterRawMode(io, fd);
+    defer thermite.terminal.exitRawMode(io, fd) catch {};
+    try thermite.terminal.hideCursor(io, fd);
+    defer thermite.terminal.showCursor(io, fd) catch {};
 
     // Create render buffer
     var buffer = try RenderBuffer.init(allocator, width, height);
     defer buffer.deinit();
 
     // Output buffer
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
 
     // Build measured character sets at startup
@@ -1517,7 +1516,7 @@ pub fn main() !void {
         defer allocator.free(status);
         try output.appendSlice(allocator, status);
 
-        _ = try std.posix.write(fd, output.items);
+        try thermite.terminal.writeAll(io, fd, output.items);
 
         // Update rotation
         if (!paused) {
@@ -1525,8 +1524,8 @@ pub fn main() !void {
             angle4d += 0.015;
         }
 
-        std.Thread.sleep(25 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(25), .awake) catch {};
     }
 
-    try thermite.terminal.clearScreen(fd);
+    try thermite.terminal.clearScreen(io, fd);
 }

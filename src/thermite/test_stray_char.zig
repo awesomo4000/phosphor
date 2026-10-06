@@ -36,7 +36,7 @@ test "find stray 6 in gradient rendering" {
     defer allocator.free(block_mappings);
     
     // Simulate rendering
-    var output = std.ArrayList(u8){};
+    var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
     const writer = output.writer();
     

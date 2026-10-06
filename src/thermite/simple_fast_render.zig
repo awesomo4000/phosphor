@@ -2,7 +2,7 @@ const std = @import("std");
 
 // Simplified fast render that just fills screen with spaces and background colors
 pub fn simpleRender(allocator: std.mem.Allocator, ttyfd: i32, pixels: []const u32, width: u32, height: u32) !void {
-    var buffer = std.ArrayList(u8){};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
     
     const writer = buffer.writer();

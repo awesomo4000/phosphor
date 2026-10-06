@@ -329,10 +329,10 @@ pub fn renderTree(
     bounds: Rect,
     allocator: Allocator,
 ) ![]DrawCommand {
-    var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+    var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
     errdefer commands.deinit(allocator);
 
-    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .{};
+    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .empty;
     defer widget_positions.deinit(allocator); // Not returned in legacy API
 
     try renderNode(node, bounds, allocator, &commands, &widget_positions);
@@ -347,10 +347,10 @@ pub fn renderTreeWithPositions(
     bounds: Rect,
     allocator: Allocator,
 ) !RenderResult {
-    var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+    var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
     errdefer commands.deinit(allocator);
 
-    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .{};
+    var widget_positions: std.ArrayListUnmanaged(WidgetPosition) = .empty;
     errdefer widget_positions.deinit(allocator);
 
     try renderNode(node, bounds, allocator, &commands, &widget_positions);

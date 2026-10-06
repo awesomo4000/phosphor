@@ -4,14 +4,14 @@ const terminal = lib.terminal;
 const Sprite = lib.Sprite;
 
 /// Draw status bar at bottom of screen
-fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, frame: u32) void {
+fn drawStatusBar(io: std.Io, fd: i32, term_height: u32, term_width: u32, fps: u32, frame: u32) void {
     if (term_width < 20 or term_height < 5) return;
 
     var buf: [256]u8 = undefined;
 
     // Move to bottom row, set white on black
     const prefix = std.fmt.bufPrint(&buf, "\x1b[{};1H\x1b[0m\x1b[97;40m", .{term_height}) catch return;
-    _ = std.posix.write(fd, prefix) catch {};
+    terminal.writeAll(io, fd, prefix) catch {};
 
     // Build status text
     var status_buf: [200]u8 = undefined;
@@ -21,27 +21,26 @@ fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, frame: u3
         std.fmt.bufPrint(&status_buf, " FPS:{d:>3} [Q]=quit ", .{fps}) catch return;
 
     const write_len = @min(status.len, term_width);
-    _ = std.posix.write(fd, status[0..write_len]) catch {};
+    terminal.writeAll(io, fd, status[0..write_len]) catch {};
 
     // Fill rest of line with spaces
     if (term_width > write_len) {
         var spaces: [200]u8 = undefined;
         const fill_len = @min(term_width - @as(u32, @intCast(write_len)), 200);
         @memset(spaces[0..fill_len], ' ');
-        _ = std.posix.write(fd, spaces[0..fill_len]) catch {};
+        terminal.writeAll(io, fd, spaces[0..fill_len]) catch {};
     }
 
     // Reset colors
-    _ = std.posix.write(fd, "\x1b[0m") catch {};
+    terminal.writeAll(io, fd, "\x1b[0m") catch {};
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Initialize terminal renderer
-    const renderer = try lib.Renderer.init(allocator);
+    const renderer = try lib.Renderer.init(allocator, io, init.environ_map);
     defer renderer.deinit();
 
     const term_fd = renderer.getTerminalFd();
@@ -118,7 +117,7 @@ pub fn main() !void {
     // FPS tracking
     var fps: u32 = 0;
     var fps_frame_count: u32 = 0;
-    var fps_last_time = std.time.milliTimestamp();
+    var fps_last_time = std.Io.Timestamp.now(io, .awake).toMilliseconds();
 
     // Initial clear
     renderer.clear();
@@ -145,7 +144,7 @@ pub fn main() !void {
         }
 
         // Update FPS counter
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(io, .awake).toMilliseconds();
         if (now - fps_last_time >= 1000) {
             fps = fps_frame_count;
             fps_frame_count = 0;
@@ -154,7 +153,7 @@ pub fn main() !void {
 
         // Update status bar every 4 frames (~15 Hz at 60fps)
         if (frame % 4 == 0) {
-            drawStatusBar(term_fd, term_height, term_width, fps, frame);
+            drawStatusBar(io, term_fd, term_height, term_width, fps, frame);
         }
 
         // Count this frame
@@ -265,7 +264,7 @@ pub fn main() !void {
         try renderer.presentOptimized();
 
         // ~60 FPS
-        std.Thread.sleep(16 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(16), .awake) catch {};
     }
 
     // Clear screen before exit

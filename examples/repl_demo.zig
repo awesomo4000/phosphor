@@ -35,7 +35,7 @@ const Model = struct {
         const keytester = KeyTester.init(allocator);
 
         // Welcome messages
-        const pid = std.c.getpid();
+        const pid = std.posix.system.getpid();
         log.print("Welcome to Phosphor REPL Demo! (pid: {})", .{pid}) catch {};
         log.append("Commands: help, clear, history, exit") catch {};
         log.append("Keys: Ctrl+O newline | Ctrl+C cancel | Ctrl+D exit") catch {};
@@ -222,11 +222,8 @@ pub fn subs(_: *Model) app.Subs {
 // Main
 // ─────────────────────────────────────────────────────────────
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    try app.App(@This()).run(gpa.allocator(), .{
+pub fn main(proc: std.process.Init) !void {
+    try app.App(@This()).run(proc, .{
         .backend = .thermite_threaded,
         .target_fps = 30, // REPL doesn't need high fps
     });

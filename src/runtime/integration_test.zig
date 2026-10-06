@@ -67,7 +67,7 @@ fn counterUpdate(model: *CounterModel, msg: CounterMsg, ctx: Context) Effect {
 // ─────────────────────────────────────────────────────────────
 
 test "integration: key injection and processing" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -86,7 +86,7 @@ test "integration: key injection and processing" {
 }
 
 test "integration: arrow key navigation" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -103,7 +103,7 @@ test "integration: arrow key navigation" {
 }
 
 test "integration: quit on q" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -117,7 +117,7 @@ test "integration: quit on q" {
 }
 
 test "integration: quit on ctrl-c" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -131,7 +131,7 @@ test "integration: quit on ctrl-c" {
 }
 
 test "integration: context provides time" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -145,7 +145,7 @@ test "integration: context provides time" {
 }
 
 test "integration: context provides frame number" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -167,7 +167,7 @@ test "integration: context provides frame number" {
 }
 
 test "integration: time advances between steps" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -186,7 +186,7 @@ test "integration: time advances between steps" {
 }
 
 test "integration: multiple steps accumulate" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};
@@ -209,7 +209,7 @@ test "integration: multiple steps accumulate" {
 }
 
 test "integration: empty step is no-op" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{ .count = 5 };
@@ -223,7 +223,7 @@ test "integration: empty step is no-op" {
 }
 
 test "integration: sendAll injects multiple messages" {
-    var rt = Runtime(CounterMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(CounterMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = CounterModel{};

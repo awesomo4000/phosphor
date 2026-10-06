@@ -25,7 +25,7 @@ test "render output inspection" {
     back.setCell(1, 0, Cell{ .ch = '▀', .fg = 0x00FF00, .bg = 0x0000FF });
     
     // Simulate render output
-    var output = std.ArrayList(u8){};
+    var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
     const writer = output.writer();
     

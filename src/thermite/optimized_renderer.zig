@@ -6,7 +6,7 @@ const capabilities = @import("capabilities.zig");
 /// Render with optimizations: batch consecutive cells with same colors
 pub fn renderOptimized(self: *Renderer) !void {
     self.output_buffer.clearRetainingCapacity();
-    const writer = self.output_buffer.writer(self.allocator);
+    const writer: Renderer.OutputWriter = .{ .list = &self.output_buffer, .gpa = self.allocator };
 
     const force_full = self.first_frame;
 
@@ -142,7 +142,7 @@ pub fn renderOptimized(self: *Renderer) !void {
 
     // Write to terminal
     if (self.output_buffer.items.len > 0) {
-        _ = try std.posix.write(self.ttyfd, self.output_buffer.items);
+        try terminal.writeAll(self.io, self.ttyfd, self.output_buffer.items);
     }
 
     // Copy back buffer to front

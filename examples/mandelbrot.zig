@@ -82,7 +82,7 @@ pub const Model = struct {
     // FPS tracking
     fps: u32 = 0,
     fps_frame_count: u32 = 0,
-    fps_last_time: i64 = 0,
+    fps_elapsed: f32 = 0,
 
     // Status bar buffer
     status_buf: [128]u8 = undefined,
@@ -101,7 +101,7 @@ pub const Model = struct {
         const status = if (self.is_paused) "PAUSED " else "RUNNING";
         self.status_len = (std.fmt.bufPrint(&self.status_buf, " {s} | FPS:{d:>3} | {s: <16} | Zoom:{e:>9.2} | [SPC]=pause [Q]=quit ", .{
             status, self.fps, target.name, self.zoom,
-        }) catch &self.status_buf).len;
+        }) catch @as([]u8, &self.status_buf)).len;
         return self.status_buf[0..self.status_len];
     }
 };
@@ -121,20 +121,20 @@ pub const Msg = union(enum) {
 // ============================================
 
 pub fn init() Model {
-    return .{ .fps_last_time = std.time.milliTimestamp() };
+    return .{};
 }
 
 pub fn update(model: *Model, msg: Msg, allocator: std.mem.Allocator) app.Effect(Msg) {
     switch (msg) {
-        .tick => |_| {
+        .tick => |dt| {
             if (model.is_paused) return .none;
 
             // Update FPS
-            const now = std.time.milliTimestamp();
-            if (now - model.fps_last_time >= 1000) {
+            model.fps_elapsed += dt;
+            if (model.fps_elapsed >= 1.0) {
                 model.fps = model.fps_frame_count;
                 model.fps_frame_count = 0;
-                model.fps_last_time = now;
+                model.fps_elapsed = 0;
             }
 
             model.frame += 1;
@@ -228,9 +228,6 @@ pub fn subs(model: *Model) app.Subs {
 // Main
 // ============================================
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    try app.App(@This()).run(gpa.allocator(), .{ .backend = .thermite_threaded, .target_fps = 120 });
+pub fn main(proc: std.process.Init) !void {
+    try app.App(@This()).run(proc, .{ .backend = .thermite_threaded, .target_fps = 120 });
 }

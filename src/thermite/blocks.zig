@@ -107,8 +107,8 @@ pub fn pixelsToBlock(pixels: [4]u32) BlockMapping {
 
     // More than 2 colors: approximate by using most common color as background
     // and picking the best quadrant pattern
-    var color_counts = [_]u32{0} ** 4;
-    var color_values = [_]u32{0} ** 4;
+    var color_counts: [4]u32 = @splat(0);
+    var color_values: [4]u32 = @splat(0);
     var num_counted: usize = 0;
 
     for (colors) |color| {
@@ -180,7 +180,7 @@ pub fn pixelBufferToBlocks(
             const py = by * 2;
 
             // Get 2x2 pixel block, handling edge cases
-            var pixel_block: [4]u32 = .{0} ** 4;
+            var pixel_block: [4]u32 = @splat(0);
 
             // Upper left
             if (py < pixel_height and px < pixel_width) {

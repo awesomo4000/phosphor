@@ -35,12 +35,13 @@ pub const InputSource = union(enum) {
 
 /// Real terminal input source
 pub const TerminalInput = struct {
+    io: std.Io,
     fd: i32,
     original_termios: ?std.posix.termios = null,
 
-    pub fn init() !TerminalInput {
-        const fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
-        errdefer std.posix.close(fd);
+    pub fn init(io: std.Io) !TerminalInput {
+        const fd = try thermite.terminal.openTty(io);
+        errdefer thermite.terminal.closeTty(io, fd);
 
         // Enter raw mode
         const original = try std.posix.tcgetattr(fd);
@@ -56,6 +57,7 @@ pub const TerminalInput = struct {
         thermite.terminal.installSignalHandlers(fd);
 
         return .{
+            .io = io,
             .fd = fd,
             .original_termios = original,
         };
@@ -65,7 +67,7 @@ pub const TerminalInput = struct {
         if (self.original_termios) |orig| {
             std.posix.tcsetattr(self.fd, .FLUSH, orig) catch {};
         }
-        std.posix.close(self.fd);
+        thermite.terminal.closeTty(self.io, self.fd);
     }
 
     pub fn poll(self: *TerminalInput, timeout_ms: i32) !PollResult {
@@ -73,7 +75,7 @@ pub const TerminalInput = struct {
     }
 
     pub fn readKey(self: *TerminalInput) ?Key {
-        return thermite.terminal.readKeyEvent(self.fd);
+        return thermite.terminal.readKeyEvent(self.io, self.fd);
     }
 
     pub fn getFd(self: *const TerminalInput) i32 {

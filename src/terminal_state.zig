@@ -29,7 +29,7 @@ pub const TerminalState = struct {
 
     /// Initialize terminal state - saves current state and installs signal handlers
     pub fn init() !TerminalState {
-        const fd = std.fs.File.stdin().handle;
+        const fd = posix.STDIN_FILENO;
 
         // Save original termios
         const original = posix.tcgetattr(fd) catch |err| {
@@ -106,10 +106,10 @@ pub const TerminalState = struct {
         self.modes_enabled.raw_mode = true;
     }
 
-    /// Send escape sequence to terminal
+    /// Send escape sequence to terminal.
+    /// Uses a raw write because this runs inside signal and panic handlers.
     fn sendSequence(seq: []const u8) void {
-        const stdout = std.fs.File.stdout();
-        _ = stdout.write(seq) catch {};
+        _ = posix.system.write(posix.STDOUT_FILENO, seq.ptr, seq.len);
     }
 
     /// Enable alternate screen buffer
@@ -152,10 +152,9 @@ pub const TerminalState = struct {
     /// Color can be a name ("red", "gray") or hex ("#RRGGBB" or "#RGB")
     /// Note: Not all terminals support this (iTerm2, kitty, xterm do; Terminal.app may not)
     pub fn setCursorColor(self: *TerminalState, color: []const u8) void {
-        const stdout = std.fs.File.stdout();
-        _ = stdout.write("\x1b]12;") catch {};
-        _ = stdout.write(color) catch {};
-        _ = stdout.write("\x07") catch {};
+        sendSequence("\x1b]12;");
+        sendSequence(color);
+        sendSequence("\x07");
         self.modes_enabled.cursor_color_changed = true;
     }
 

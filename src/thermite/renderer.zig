@@ -14,6 +14,7 @@ pub const Renderer = struct {
     front_plane: *Plane,
     back_plane: *Plane,
     ttyfd: i32,
+    io: std.Io,
     term_width: u32,
     term_height: u32,
     allocator: std.mem.Allocator,
@@ -26,7 +27,7 @@ pub const Renderer = struct {
     /// Detected terminal capabilities
     caps: Capabilities = .{},
 
-    pub fn init(allocator: std.mem.Allocator) !*Renderer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) !*Renderer {
         const timer = @import("startup_timer");
         timer.mark("Renderer.init() entry");
 
@@ -35,7 +36,7 @@ pub const Renderer = struct {
         timer.mark("Renderer struct allocated");
 
         // Get terminal info
-        const tinfo = try terminal.getTerminalInfo();
+        const tinfo = try terminal.getTerminalInfo(io);
         timer.mark("getTerminalInfo() done");
 
         // Create double buffers
@@ -48,22 +49,23 @@ pub const Renderer = struct {
         timer.mark("back Plane.init() done");
 
         // Detect terminal capabilities
-        const caps = capabilities.detectFromEnv();
+        const caps = capabilities.detectFromEnv(io, env);
         timer.mark("capabilities detected");
 
         renderer.* = .{
             .front_plane = front,
             .back_plane = back,
             .ttyfd = tinfo.fd,
+            .io = io,
             .term_width = tinfo.width,
             .term_height = tinfo.height,
             .allocator = allocator,
-            .output_buffer = std.ArrayList(u8){},
+            .output_buffer = .empty,
             .caps = caps,
         };
 
         // Initialize terminal (includes alt screen, hide cursor, clear - all atomic)
-        try terminal.enterRawMode(renderer.ttyfd);
+        try terminal.enterRawMode(io, renderer.ttyfd);
         timer.mark("enterRawMode() done");
 
         // Initialize buffers - use explicit black for terminals that don't handle transparent
@@ -84,7 +86,7 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer) void {
         // exitRawMode handles all terminal cleanup (reset, cursor, alt screen exit)
-        terminal.exitRawMode(self.ttyfd) catch {};
+        terminal.exitRawMode(self.io, self.ttyfd) catch {};
 
         self.front_plane.deinit();
         self.back_plane.deinit();
@@ -158,10 +160,28 @@ pub const Renderer = struct {
         }
     }
 
+    /// Appends escape sequences and text to output_buffer
+    pub const OutputWriter = struct {
+        list: *std.ArrayList(u8),
+        gpa: std.mem.Allocator,
+
+        pub fn writeAll(w: OutputWriter, bytes: []const u8) !void {
+            try w.list.appendSlice(w.gpa, bytes);
+        }
+
+        pub fn writeByte(w: OutputWriter, byte: u8) !void {
+            try w.list.append(w.gpa, byte);
+        }
+
+        pub fn print(w: OutputWriter, comptime fmt: []const u8, args: anytype) !void {
+            try w.list.print(w.gpa, fmt, args);
+        }
+    };
+
     /// Render the back buffer to the terminal
     pub fn render(self: *Renderer) !void {
         self.output_buffer.clearRetainingCapacity();
-        const writer = self.output_buffer.writer(self.allocator);
+        const writer: OutputWriter = .{ .list = &self.output_buffer, .gpa = self.allocator };
 
         // Move cursor to home
         try writer.writeAll(terminal.CURSOR_HOME);
@@ -222,7 +242,7 @@ pub const Renderer = struct {
         try writer.writeAll(terminal.RESET_ALL);
 
         // Write to terminal
-        _ = try std.posix.write(self.ttyfd, self.output_buffer.items);
+        try terminal.writeAll(self.io, self.ttyfd, self.output_buffer.items);
 
         // Swap buffers
         self.swapBuffers();
@@ -231,7 +251,7 @@ pub const Renderer = struct {
     /// Render only the differences between front and back buffers
     pub fn renderDifferential(self: *Renderer) !void {
         self.output_buffer.clearRetainingCapacity();
-        const writer = self.output_buffer.writer(self.allocator);
+        const writer: OutputWriter = .{ .list = &self.output_buffer, .gpa = self.allocator };
 
         // Force full render on first frame
         const force_full = self.first_frame;
@@ -336,7 +356,7 @@ pub const Renderer = struct {
 
         // Write to terminal
         if (self.output_buffer.items.len > 0) {
-            _ = try std.posix.write(self.ttyfd, self.output_buffer.items);
+            try terminal.writeAll(self.io, self.ttyfd, self.output_buffer.items);
         }
 
         // Copy back buffer to front buffer
@@ -352,12 +372,12 @@ pub const Renderer = struct {
     /// Sync with terminal - blocks until terminal has actually rendered.
     /// Useful for measuring real display latency vs write latency.
     pub fn sync(self: *Renderer) !void {
-        try terminal.sync(self.ttyfd);
+        try terminal.sync(self.io, self.ttyfd);
     }
 
     /// Measure display latency in nanoseconds.
     pub fn measureDisplayLatency(self: *Renderer) !i128 {
-        return terminal.measureDisplayLatency(self.ttyfd);
+        return terminal.measureDisplayLatency(self.io, self.ttyfd);
     }
 
     // =========================================================================
@@ -481,7 +501,7 @@ pub const Renderer = struct {
         self.force_full_render = true;
 
         // Clear screen to avoid artifacts
-        try terminal.clearScreen(self.ttyfd);
+        try terminal.clearScreen(self.io, self.ttyfd);
     }
 
     /// Force a full redraw on next render (used after SIGCONT)

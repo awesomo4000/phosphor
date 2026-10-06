@@ -1,5 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
+const Io = std.Io;
+const Environ = std.process.Environ;
 
 /// Terminal capabilities detected at runtime
 pub const Capabilities = struct {
@@ -92,11 +94,11 @@ pub const ctlseqs = struct {
 /// Environment variable overrides (for debugging):
 /// - PHOSPHOR_COLOR: "truecolor", "256", "basic", or "none"
 /// - PHOSPHOR_DEBUG_CAPS: "1" to print detected capabilities
-pub fn detectFromEnv() Capabilities {
+pub fn detectFromEnv(io: Io, env: *const Environ.Map) Capabilities {
     var caps = Capabilities{};
 
     // Check for color mode override first
-    if (getEnv("PHOSPHOR_COLOR")) |color_override| {
+    if (env.get("PHOSPHOR_COLOR")) |color_override| {
         if (std.mem.eql(u8, color_override, "truecolor")) {
             caps.color = .truecolor;
         } else if (std.mem.eql(u8, color_override, "256")) {
@@ -110,10 +112,10 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Track if we have a manual color override
-    const has_color_override = getEnv("PHOSPHOR_COLOR") != null;
+    const has_color_override = env.get("PHOSPHOR_COLOR") != null;
 
     // Check TERM_PROGRAM first (most specific)
-    if (getEnv("TERM_PROGRAM")) |prog| {
+    if (env.get("TERM_PROGRAM")) |prog| {
         if (std.mem.eql(u8, prog, "Apple_Terminal")) {
             caps.terminal = .apple_terminal;
             if (!has_color_override) caps.color = .@"256"; // Terminal.app lies about true color
@@ -152,7 +154,7 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Check for Kitty
-    if (getEnv("KITTY_WINDOW_ID")) |_| {
+    if (env.get("KITTY_WINDOW_ID")) |_| {
         caps.terminal = .kitty;
         caps.color = .truecolor;
         caps.kitty_graphics = true;
@@ -164,7 +166,7 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Check for Windows Terminal
-    if (getEnv("WT_SESSION")) |_| {
+    if (env.get("WT_SESSION")) |_| {
         caps.terminal = .windows_terminal;
         caps.color = .truecolor;
         caps.synchronized_output = true;
@@ -173,7 +175,7 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Check for Alacritty
-    if (getEnv("ALACRITTY_WINDOW_ID")) |_| {
+    if (env.get("ALACRITTY_WINDOW_ID")) |_| {
         caps.terminal = .alacritty;
         caps.color = .truecolor;
         caps.synchronized_output = true;
@@ -183,7 +185,7 @@ pub fn detectFromEnv() Capabilities {
     // Check for tmux (affects capabilities)
     // Important: tmux sets COLORTERM=truecolor, but the outer terminal might not support it
     // We use passthrough to detect the actual outer terminal capabilities
-    if (getEnv("TMUX")) |_| {
+    if (env.get("TMUX")) |_| {
         caps.terminal = .tmux;
         caps.synchronized_output = true;
 
@@ -191,7 +193,7 @@ pub fn detectFromEnv() Capabilities {
         // If outer terminal responds to XTVERSION → modern → truecolor safe
         // If timeout → legacy (like Apple Terminal) → use 256-color
         if (!has_color_override) {
-            if (probeOuterTerminalViaTmux()) {
+            if (probeOuterTerminalViaTmux(io)) {
                 caps.color = .truecolor;
             } else {
                 caps.color = .@"256"; // Conservative fallback for legacy terminals
@@ -202,21 +204,21 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Check for Zellij
-    if (getEnv("ZELLIJ")) |_| {
+    if (env.get("ZELLIJ")) |_| {
         caps.terminal = .zellij;
         caps.color = .truecolor;
         caps.synchronized_output = true;
     }
 
     // Check COLORTERM for true color hint
-    if (getEnv("COLORTERM")) |ct| {
+    if (env.get("COLORTERM")) |ct| {
         if (std.mem.eql(u8, ct, "truecolor") or std.mem.eql(u8, ct, "24bit")) {
             caps.color = .truecolor;
         }
     }
 
     // Fallback: check TERM for basic capability hints
-    if (getEnv("TERM")) |term| {
+    if (env.get("TERM")) |term| {
         if (caps.color != .truecolor) {
             if (std.mem.indexOf(u8, term, "256color") != null) {
                 caps.color = .@"256";
@@ -242,7 +244,7 @@ pub fn detectFromEnv() Capabilities {
     }
 
     // Debug output if requested - write to fd 2 (stderr) directly
-    if (getEnv("PHOSPHOR_DEBUG_CAPS")) |_| {
+    if (env.get("PHOSPHOR_DEBUG_CAPS")) |_| {
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf,
             \\
@@ -259,28 +261,22 @@ pub fn detectFromEnv() Capabilities {
             @tagName(caps.terminal),
             @tagName(caps.color),
             caps.synchronized_output,
-            getEnv("TERM_PROGRAM") orelse "(not set)",
-            getEnv("TERM") orelse "(not set)",
-            getEnv("COLORTERM") orelse "(not set)",
+            env.get("TERM_PROGRAM") orelse "(not set)",
+            env.get("TERM") orelse "(not set)",
+            env.get("COLORTERM") orelse "(not set)",
         }) catch "";
-        _ = posix.write(2, msg) catch {};
+        Io.File.stderr().writeStreamingAll(io, msg) catch {};
     }
 
     return caps;
 }
 
-/// Get environment variable, returning null if not set
-fn getEnv(name: []const u8) ?[]const u8 {
-    return posix.getenv(name);
-}
-
 /// Probe outer terminal via tmux passthrough to detect if it's modern.
 /// Returns true if outer terminal responds to XTVERSION (modern terminal).
 /// Returns false on timeout (legacy terminal like Apple Terminal).
-fn probeOuterTerminalViaTmux() bool {
+fn probeOuterTerminalViaTmux(io: Io) bool {
     // Check current passthrough state
-    const check_result = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
+    const check_result = std.process.run(std.heap.page_allocator, io, .{
         .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
     }) catch return true; // If we can't check, assume modern (safer for user experience)
     defer std.heap.page_allocator.free(check_result.stdout);
@@ -290,14 +286,12 @@ fn probeOuterTerminalViaTmux() bool {
 
     // Enable passthrough if needed
     if (!was_enabled) {
-        _ = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
+        _ = std.process.run(std.heap.page_allocator, io, .{
             .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "on" },
         }) catch return true; // If we can't enable, assume modern
 
         // Verify it changed
-        const verify_result = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
+        const verify_result = std.process.run(std.heap.page_allocator, io, .{
             .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
         }) catch return true;
         defer std.heap.page_allocator.free(verify_result.stdout);
@@ -308,16 +302,15 @@ fn probeOuterTerminalViaTmux() bool {
         }
 
         // Small delay for tmux to process config change
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 
     // Query XTVERSION via passthrough
-    const is_modern = queryXtversionViaPassthrough();
+    const is_modern = queryXtversionViaPassthrough(io);
 
     // Restore passthrough state if we changed it
     if (!was_enabled) {
-        _ = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
+        _ = std.process.run(std.heap.page_allocator, io, .{
             .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "off" },
         }) catch {};
     }
@@ -327,7 +320,7 @@ fn probeOuterTerminalViaTmux() bool {
 
 /// Send XTVERSION query via tmux passthrough and check for response.
 /// Returns true if we got a response (modern terminal).
-fn queryXtversionViaPassthrough() bool {
+fn queryXtversionViaPassthrough(io: Io) bool {
     const fd: posix.fd_t = 0; // stdin
 
     // Save terminal state
@@ -346,7 +339,7 @@ fn queryXtversionViaPassthrough() bool {
     // XTVERSION query: \x1b[>0q
     // Doubled for passthrough: \x1b\x1b[>0q
     // Full: \x1bPtmux;\x1b\x1b[>0q\x1b\\
-    _ = posix.write(fd, "\x1bPtmux;\x1b\x1b[>0q\x1b\\") catch return true;
+    Io.File.stdin().writeStreamingAll(io, "\x1bPtmux;\x1b\x1b[>0q\x1b\\") catch return true;
 
     // Poll with 50ms timeout (modern terminals respond in <10ms, legacy don't respond at all)
     var fds = [_]posix.pollfd{.{

@@ -64,9 +64,11 @@ pub fn Application(comptime Model: type, comptime Msg: type) type {
         };
 
         /// Run the application
-        pub fn run(self: Self, allocator: Allocator) !void {
+        pub fn run(self: Self, init: std.process.Init) !void {
+            const allocator = init.gpa;
+
             // Initialize backend
-            var thermite = try ThermiteBackend.init(allocator);
+            var thermite = try ThermiteBackend.init(allocator, init.io, init.environ_map);
             defer thermite.deinit();
             const be = thermite.backend();
 
@@ -130,7 +132,7 @@ pub fn Application(comptime Model: type, comptime Msg: type) type {
             const size = be.getSize();
             const bounds = Rect{ .x = 0, .y = 0, .w = size.cols, .h = size.rows };
 
-            var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+            var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
             try commands.append(frame_alloc, .clear_screen);
 
             const tree_commands = try renderTree(&root, bounds, frame_alloc);

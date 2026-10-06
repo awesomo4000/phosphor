@@ -53,7 +53,7 @@ pub const Repl = struct {
             .allocator = allocator,
             .buffer = try LineBuffer.init(allocator),
             .history = History.init(allocator, config.history_limit),
-            .segments = .{},
+            .segments = .empty,
             .in_paste = false,
             .config = config,
         };
@@ -186,7 +186,7 @@ pub const Repl = struct {
             .escape => {
                 return .none;
             },
-            .unknown => |_| {
+            .unknown => {
                 return .none;
             },
             // Unhandled keys (page up/down, F-keys, etc.)
@@ -287,10 +287,10 @@ pub const Repl = struct {
         width: u16,
         allocator: Allocator,
     ) !ViewResult {
-        var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+        var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
         errdefer commands.deinit(allocator);
 
-        var text_allocs: std.ArrayListUnmanaged([]const u8) = .{};
+        var text_allocs: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (text_allocs.items) |t| allocator.free(t);
             text_allocs.deinit(allocator);
@@ -567,7 +567,7 @@ pub const Repl = struct {
     fn localWidgetView(ptr: *anyopaque, size: LayoutSize, allocator: Allocator) anyerror![]DrawCommand {
         const self: *Repl = @ptrCast(@alignCast(ptr));
 
-        var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+        var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
         errdefer commands.deinit(allocator);
 
         const prompt = self.config.prompt;
@@ -858,7 +858,7 @@ pub const History = struct {
     pub fn init(allocator: Allocator, limit: usize) History {
         return .{
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .limit = limit,
         };
     }

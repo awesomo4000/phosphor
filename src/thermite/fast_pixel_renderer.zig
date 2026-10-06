@@ -55,7 +55,7 @@ pub const FastPixelRenderer = struct {
             .allocator = allocator,
             .current_cells = current_cells,
             .last_cells = last_cells,
-            .output_buffer = std.ArrayList(u8){},
+            .output_buffer = .empty,
         };
         
         return renderer;

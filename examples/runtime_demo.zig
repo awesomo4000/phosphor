@@ -84,14 +84,10 @@ fn view(model: *Model) phosphor.runtime.ViewResult {
 // Main
 // ─────────────────────────────────────────────────────────────
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("Runtime Demo - Press keys, 'q' to quit\n", .{});
 
-    var rt = Runtime(Msg).init(allocator, .{
+    var rt = Runtime(Msg).init(init.gpa, init.io, .{
         .target_fps = 30,
         .headless = false,
     });
@@ -109,7 +105,7 @@ pub fn main() !void {
 // ─────────────────────────────────────────────────────────────
 
 test "runtime demo: key injection" {
-    var rt = Runtime(Msg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(Msg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = Model{};
@@ -127,7 +123,7 @@ test "runtime demo: key injection" {
 }
 
 test "runtime demo: quit on q" {
-    var rt = Runtime(Msg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(Msg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = Model{};
@@ -140,7 +136,7 @@ test "runtime demo: quit on q" {
 }
 
 test "runtime demo: context has time" {
-    var rt = Runtime(Msg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(Msg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     rt.setTime(12345);

@@ -28,7 +28,7 @@ pub const MockTerminal = struct {
             .width = width,
             .height = height,
             .cells = cells,
-            .output_buffer = std.ArrayList(u8){},
+            .output_buffer = .empty,
             .allocator = allocator,
         };
 

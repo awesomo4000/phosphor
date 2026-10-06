@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
 const system = builtin.os.tag;
 
 // ANSI escape sequences
@@ -30,11 +31,29 @@ var terminal_fd: ?i32 = null;
 var resize_pending: bool = false;
 var cont_pending: bool = false;
 
-pub fn getTerminalInfo() !TerminalInfo {
+/// Write all bytes to a terminal fd
+pub fn writeAll(io: Io, fd: std.posix.fd_t, bytes: []const u8) Io.File.Writer.Error!void {
+    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try file.writeStreamingAll(io, bytes);
+}
+
+/// Open the controlling terminal for reading and writing
+pub fn openTty(io: Io) Io.File.OpenError!std.posix.fd_t {
+    const file = try Io.Dir.openFileAbsolute(io, "/dev/tty", .{ .mode = .read_write });
+    return file.handle;
+}
+
+/// Close a terminal fd opened with openTty
+pub fn closeTty(io: Io, fd: std.posix.fd_t) void {
+    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    file.close(io);
+}
+
+pub fn getTerminalInfo(io: Io) !TerminalInfo {
     const timer = @import("startup_timer");
     timer.mark("  getTerminalInfo: opening /dev/tty");
 
-    const tty_fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
+    const tty_fd = try openTty(io);
     timer.mark("  getTerminalInfo: /dev/tty opened");
 
     // Get terminal size
@@ -42,7 +61,7 @@ pub fn getTerminalInfo() !TerminalInfo {
 
     // Platform-specific ioctl
     switch (system) {
-        .linux => _ = try std.os.linux.ioctl(tty_fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize)),
+        .linux => _ = std.os.linux.ioctl(tty_fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize)),
         .macos => {
             // On macOS, we need to use the system ioctl
             const TIOCGWINSZ = 0x40087468; // macOS specific value
@@ -59,7 +78,7 @@ pub fn getTerminalInfo() !TerminalInfo {
     };
 }
 
-pub fn enterRawMode(fd: i32) !void {
+pub fn enterRawMode(io: Io, fd: i32) !void {
     const timer = @import("startup_timer");
 
     if (system == .windows) {
@@ -106,57 +125,57 @@ pub fn enterRawMode(fd: i32) !void {
     ++ CLEAR_SCREEN // Clear screen
     ++ CURSOR_HOME; // Home cursor
 
-    _ = try std.posix.write(fd, setup_sequence);
+    try writeAll(io, fd, setup_sequence);
     timer.mark("  enterRawMode: setup sequence written");
 }
 
-pub fn exitRawMode(fd: i32) !void {
+pub fn exitRawMode(io: Io, fd: i32) !void {
     if (system == .windows) {
         return;
     }
 
     // Thorough cleanup sequence to ensure terminal is in good state:
     // 1. Reset all attributes (colors, bold, etc.)
-    _ = std.posix.write(fd, RESET_ALL) catch {};
+    writeAll(io, fd, RESET_ALL) catch {};
 
     // 2. Disable synchronized output mode (in case we're mid-frame)
-    _ = std.posix.write(fd, "\x1b[?2026l") catch {};
+    writeAll(io, fd, "\x1b[?2026l") catch {};
 
     // 3. Re-enable auto-wrap mode (we disabled it on entry)
-    _ = std.posix.write(fd, "\x1b[?7h") catch {};
+    writeAll(io, fd, "\x1b[?7h") catch {};
 
     // 4. Show cursor (in case it was hidden)
-    _ = std.posix.write(fd, SHOW_CURSOR) catch {};
+    writeAll(io, fd, SHOW_CURSOR) catch {};
 
     // 5. Exit alternate screen buffer - restores main screen
-    _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
+    writeAll(io, fd, EXIT_ALT_SCREEN) catch {};
 
     // 6. Reset attributes again after exiting alt screen (main screen state)
-    _ = std.posix.write(fd, RESET_ALL) catch {};
+    writeAll(io, fd, RESET_ALL) catch {};
 
     if (original_termios) |tios| {
         _ = try std.posix.tcsetattr(fd, .FLUSH, tios);
     }
 }
 
-pub fn clearScreen(fd: i32) !void {
-    _ = try std.posix.write(fd, CLEAR_SCREEN ++ CURSOR_HOME);
+pub fn clearScreen(io: Io, fd: i32) !void {
+    try writeAll(io, fd, CLEAR_SCREEN ++ CURSOR_HOME);
 }
 
 /// Clear screen with an explicit background color (for terminals that don't handle transparent well)
-pub fn clearScreenWithBg(fd: i32, r: u8, g: u8, b: u8) !void {
+pub fn clearScreenWithBg(io: Io, fd: i32, r: u8, g: u8, b: u8) !void {
     var buf: [64]u8 = undefined;
     // Set background color, clear screen, reset to default
     const seq = try std.fmt.bufPrint(&buf, "\x1b[48;2;{};{};{}m" ++ CLEAR_SCREEN ++ CURSOR_HOME ++ RESET_ALL, .{ r, g, b });
-    _ = try std.posix.write(fd, seq);
+    try writeAll(io, fd, seq);
 }
 
 /// Sync with the terminal - blocks until terminal has processed all prior output.
 /// Uses a cursor position query (DSR) as a round-trip barrier.
 /// Useful for measuring actual display latency vs write latency.
-pub fn sync(fd: i32) !void {
+pub fn sync(io: Io, fd: i32) !void {
     // Send Device Status Report - cursor position query
-    _ = try std.posix.write(fd, "\x1b[6n");
+    try writeAll(io, fd, "\x1b[6n");
 
     // Read until we get the response: \x1b[{row};{col}R
     // The response arriving means terminal has processed everything before the query
@@ -177,49 +196,63 @@ pub fn sync(fd: i32) !void {
 
 /// Measure time for terminal to actually render (not just write completion).
 /// Returns elapsed nanoseconds from write to terminal acknowledgment.
-pub fn measureDisplayLatency(fd: i32) !i128 {
-    const start = std.time.nanoTimestamp();
-    try sync(fd);
-    return std.time.nanoTimestamp() - start;
+pub fn measureDisplayLatency(io: Io, fd: i32) !i128 {
+    const start = Io.Timestamp.now(io, .awake);
+    try sync(io, fd);
+    return start.untilNow(io, .awake).toNanoseconds();
 }
 
-pub fn hideCursor(fd: i32) !void {
-    _ = try std.posix.write(fd, HIDE_CURSOR);
+pub fn hideCursor(io: Io, fd: i32) !void {
+    try writeAll(io, fd, HIDE_CURSOR);
 }
 
-pub fn showCursor(fd: i32) !void {
-    _ = try std.posix.write(fd, SHOW_CURSOR);
+pub fn showCursor(io: Io, fd: i32) !void {
+    try writeAll(io, fd, SHOW_CURSOR);
 }
 
-pub fn moveCursor(fd: i32, x: u32, y: u32) !void {
+pub fn moveCursor(io: Io, fd: i32, x: u32, y: u32) !void {
     var buf: [32]u8 = undefined;
     const seq = try std.fmt.bufPrint(&buf, "\x1b[{};{}H", .{ y + 1, x + 1 });
-    _ = try std.posix.write(fd, seq);
+    try writeAll(io, fd, seq);
 }
 
-pub fn setForegroundColor(fd: i32, r: u8, g: u8, b: u8) !void {
+pub fn setForegroundColor(io: Io, fd: i32, r: u8, g: u8, b: u8) !void {
     var buf: [32]u8 = undefined;
     const seq = try std.fmt.bufPrint(&buf, "\x1b[38;2;{};{};{}m", .{ r, g, b });
-    _ = try std.posix.write(fd, seq);
+    try writeAll(io, fd, seq);
 }
 
-pub fn setBackgroundColor(fd: i32, r: u8, g: u8, b: u8) !void {
+pub fn setBackgroundColor(io: Io, fd: i32, r: u8, g: u8, b: u8) !void {
     var buf: [32]u8 = undefined;
     const seq = try std.fmt.bufPrint(&buf, "\x1b[48;2;{};{};{}m", .{ r, g, b });
-    _ = try std.posix.write(fd, seq);
+    try writeAll(io, fd, seq);
 }
 
-pub fn resetColors(fd: i32) !void {
-    _ = try std.posix.write(fd, RESET_ALL);
+pub fn resetColors(io: Io, fd: i32) !void {
+    try writeAll(io, fd, RESET_ALL);
+}
+
+/// Set O_NONBLOCK on fd, returning the previous file status flags.
+/// poll() can't stand in for this: macOS reports POLLNVAL for /dev/tty.
+fn setNonblocking(fd: i32) ?usize {
+    const posix = std.posix;
+    const rc = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
+    if (posix.errno(rc) != .SUCCESS) return null;
+    const old_flags: usize = @intCast(rc);
+    const nonblock: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+    if (posix.errno(posix.system.fcntl(fd, posix.F.SETFL, old_flags | nonblock)) != .SUCCESS) return null;
+    return old_flags;
+}
+
+fn restoreFlags(fd: i32, flags: usize) void {
+    _ = std.posix.system.fcntl(fd, std.posix.F.SETFL, flags);
 }
 
 /// Non-blocking read from terminal (single byte - use readKeyEvent for escape sequences)
 pub fn readKey(fd: i32) ?u8 {
     // Set non-blocking mode temporarily
-    const old_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return null;
-    const O_NONBLOCK = if (@import("builtin").os.tag == .macos) @as(c_int, 0x0004) else std.posix.O.NONBLOCK;
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags | O_NONBLOCK) catch return null;
-    defer _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags) catch {};
+    const old_flags = setNonblocking(fd) orelse return null;
+    defer restoreFlags(fd, old_flags);
 
     var buf: [1]u8 = undefined;
     const result = std.posix.read(fd, &buf) catch return null;
@@ -302,12 +335,10 @@ pub const Key = union(enum) {
 
 /// Read a key event, parsing escape sequences for arrow keys, etc.
 /// Returns null if no input available.
-pub fn readKeyEvent(fd: i32) ?Key {
+pub fn readKeyEvent(io: Io, fd: i32) ?Key {
     // Set non-blocking mode temporarily
-    const old_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return null;
-    const O_NONBLOCK = if (@import("builtin").os.tag == .macos) @as(c_int, 0x0004) else std.posix.O.NONBLOCK;
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags | O_NONBLOCK) catch return null;
-    defer _ = std.posix.fcntl(fd, std.posix.F.SETFL, old_flags) catch {};
+    const old_flags = setNonblocking(fd) orelse return null;
+    defer restoreFlags(fd, old_flags);
 
     var buf: [16]u8 = undefined;
     var total: usize = 0;
@@ -320,7 +351,7 @@ pub fn readKeyEvent(fd: i32) ?Key {
     // If it's an escape, try to read more bytes for the sequence
     if (buf[0] == 0x1b) {
         // Small delay to allow escape sequence bytes to arrive
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
 
         // Try to read more bytes
         const more = std.posix.read(fd, buf[1..]) catch 0;
@@ -558,37 +589,34 @@ fn parseCSISequence(seq: []const u8) Key {
 // ============================================================================
 
 /// SIGWINCH handler - just sets flag (signal-safe)
-fn handleSigwinch(_: c_int) callconv(.c) void {
+fn handleSigwinch(_: std.posix.SIG) callconv(.c) void {
     resize_pending = true;
 }
 
 /// SIGCONT handler - process resumed after stop (signal-safe)
-fn handleSigcont(_: c_int) callconv(.c) void {
+fn handleSigcont(_: std.posix.SIG) callconv(.c) void {
     cont_pending = true;
 }
 
 /// Cleanup signal handler - restores terminal state AND re-raises signal
-fn handleCleanupSignal(sig: c_int) callconv(.c) void {
+fn handleCleanupSignal(sig: std.posix.SIG) callconv(.c) void {
     if (terminal_fd) |fd| {
         // Restore terminal state (signal-safe writes only)
-        _ = std.posix.write(fd, "\x1b[?2026l") catch {}; // Disable sync output
-        _ = std.posix.write(fd, EXIT_ALT_SCREEN) catch {};
-        _ = std.posix.write(fd, SHOW_CURSOR) catch {};
-        _ = std.posix.write(fd, RESET_ALL) catch {};
+        const restore = "\x1b[?2026l" ++ EXIT_ALT_SCREEN ++ SHOW_CURSOR ++ RESET_ALL;
+        _ = std.posix.system.write(fd, restore, restore.len);
         if (original_termios) |tios| {
             _ = std.posix.tcsetattr(fd, .FLUSH, tios) catch {};
         }
     }
 
     // Re-raise signal with default handler so process actually dies
-    const sig_num: u6 = @intCast(sig);
     var act = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.DFL },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    _ = std.posix.sigaction(sig_num, &act, null);
-    _ = std.posix.raise(sig_num) catch {};
+    _ = std.posix.sigaction(sig, &act, null);
+    _ = std.posix.raise(sig) catch {};
 }
 
 /// Install signal handlers for cleanup (Ctrl+C, etc.) and resize (SIGWINCH)
@@ -645,17 +673,16 @@ pub fn getCurrentSize(fd: i32) ?struct { width: u32, height: u32 } {
     // Zero-initialize to detect ioctl failures (would leave garbage otherwise)
     var winsize: std.posix.winsize = std.mem.zeroes(std.posix.winsize);
 
-    const result: c_int = switch (system) {
-        .linux => @bitCast(std.os.linux.ioctl(fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize))),
+    const ok = switch (system) {
+        .linux => std.os.linux.errno(std.os.linux.ioctl(fd, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize))) == .SUCCESS,
         .macos => blk: {
             const TIOCGWINSZ = 0x40087468;
-            break :blk std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&winsize));
+            break :blk std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&winsize)) != -1;
         },
         else => return null,
     };
 
-    // ioctl returns -1 on error
-    if (result == -1) return null;
+    if (!ok) return null;
 
     if (winsize.col > 0 and winsize.row > 0) {
         return .{ .width = winsize.col, .height = winsize.row };
@@ -713,6 +740,6 @@ pub fn pollInput(fd: i32, timeout_ms: i32) !PollResult {
 /// Wake up a thread that's blocked on pollInput() by sending a Device Status Report.
 /// The terminal will respond with \x1b[0n, which unblocks the read.
 /// Call this before joining an input thread that uses blocking poll.
-pub fn wakeReader(fd: i32) void {
-    _ = std.posix.write(fd, DEVICE_STATUS_REPORT) catch {};
+pub fn wakeReader(io: Io, fd: i32) void {
+    writeAll(io, fd, DEVICE_STATUS_REPORT) catch {};
 }

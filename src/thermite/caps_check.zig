@@ -2,14 +2,23 @@ const std = @import("std");
 const posix = std.posix;
 const capabilities = @import("capabilities.zig");
 
+// Process-wide Io and environment, set at the top of main()
+var io: std.Io = undefined;
+var env: *const std.process.Environ.Map = undefined;
+
+fn writeFd(fd: posix.fd_t, bytes: []const u8) !void {
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try file.writeStreamingAll(io, bytes);
+}
+
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = posix.write(1, msg) catch {};
+    writeFd(1, msg) catch {};
 }
 
 fn printRaw(s: []const u8) void {
-    _ = posix.write(1, s) catch {};
+    writeFd(1, s) catch {};
 }
 
 /// Result of color query using the DA1 trick
@@ -46,7 +55,7 @@ fn queryColorWithDA1Trick(fd: posix.fd_t, timeout_ms: i32) ColorQueryResult {
     // Send BOTH queries together: OSC 11 + DA1
     // Terminals respond in order, so if we get DA1 without OSC 11,
     // we know OSC 11 is not supported and can bail immediately.
-    _ = posix.write(fd, "\x1b]11;?\x1b\\" ++ "\x1b[c") catch return result;
+    writeFd(fd, "\x1b]11;?\x1b\\" ++ "\x1b[c") catch return result;
 
     var fds = [_]posix.pollfd{.{
         .fd = fd,
@@ -138,7 +147,7 @@ fn queryXtversion(fd: posix.fd_t) ?[]const u8 {
     defer posix.tcsetattr(fd, .FLUSH, original) catch {};
 
     // Send XTVERSION query: \x1b[>0q
-    _ = posix.write(fd, "\x1b[>0q") catch return null;
+    writeFd(fd, "\x1b[>0q") catch return null;
 
     // Poll for response with 100ms timeout
     var fds = [_]posix.pollfd{.{
@@ -192,8 +201,10 @@ fn formatResponse(response: []const u8, buf: []u8) []const u8 {
     return buf[0..i];
 }
 
-pub fn main() void {
-    const caps = capabilities.detectFromEnv();
+pub fn main(init: std.process.Init) void {
+    io = init.io;
+    env = init.environ_map;
+    const caps = capabilities.detectFromEnv(io, env);
 
     print("\n=== Phosphor Terminal Capabilities ===\n\n", .{});
     print("Detected terminal: {s}\n", .{@tagName(caps.terminal)});
@@ -204,11 +215,11 @@ pub fn main() void {
     print("Hyperlinks:        {}\n", .{caps.hyperlinks});
 
     print("\n--- Environment Variables ---\n", .{});
-    print("TERM_PROGRAM: {s}\n", .{posix.getenv("TERM_PROGRAM") orelse "(not set)"});
-    print("TERM:         {s}\n", .{posix.getenv("TERM") orelse "(not set)"});
-    print("COLORTERM:    {s}\n", .{posix.getenv("COLORTERM") orelse "(not set)"});
-    print("KITTY_WINDOW_ID: {s}\n", .{posix.getenv("KITTY_WINDOW_ID") orelse "(not set)"});
-    print("WT_SESSION:   {s}\n", .{posix.getenv("WT_SESSION") orelse "(not set)"});
+    print("TERM_PROGRAM: {s}\n", .{env.get("TERM_PROGRAM") orelse "(not set)"});
+    print("TERM:         {s}\n", .{env.get("TERM") orelse "(not set)"});
+    print("COLORTERM:    {s}\n", .{env.get("COLORTERM") orelse "(not set)"});
+    print("KITTY_WINDOW_ID: {s}\n", .{env.get("KITTY_WINDOW_ID") orelse "(not set)"});
+    print("WT_SESSION:   {s}\n", .{env.get("WT_SESSION") orelse "(not set)"});
 
     print("\n--- Color Test ---\n", .{});
     print("Testing color output for detected mode ({s}):\n\n", .{@tagName(caps.color)});
@@ -320,13 +331,12 @@ pub fn main() void {
     }
 
     // If we're in tmux, try the passthrough hack to query outer terminal
-    if (posix.getenv("TMUX") != null) {
+    if (env.get("TMUX") != null) {
         print("\n--- Tmux Passthrough Test (EXPERIMENTAL) ---\n", .{});
         print("Detected tmux session. Attempting to query OUTER terminal...\n\n", .{});
 
         // Check current passthrough state
-        const check_result = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
+        const check_result = std.process.run(std.heap.page_allocator, io, .{
             .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
         }) catch |err| {
             print("Failed to check passthrough state: {}\n", .{err});
@@ -342,8 +352,7 @@ pub fn main() void {
         // Enable passthrough if needed
         if (!was_enabled) {
             print("Enabling passthrough temporarily...\n", .{});
-            _ = std.process.Child.run(.{
-                .allocator = std.heap.page_allocator,
+            _ = std.process.run(std.heap.page_allocator, io, .{
                 .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "on" },
             }) catch |err| {
                 print("Failed to enable passthrough: {}\n", .{err});
@@ -352,8 +361,7 @@ pub fn main() void {
             };
 
             // Verify it actually changed
-            const verify_result = std.process.Child.run(.{
-                .allocator = std.heap.page_allocator,
+            const verify_result = std.process.run(std.heap.page_allocator, io, .{
                 .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
             }) catch |err| {
                 print("Failed to verify passthrough state: {}\n", .{err});
@@ -372,7 +380,7 @@ pub fn main() void {
             print("Verified: passthrough is now on\n", .{});
 
             // Small delay to let tmux process the config change
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            io.sleep(.fromMilliseconds(50), .awake) catch {};
         }
 
         // Now query through passthrough
@@ -430,14 +438,12 @@ pub fn main() void {
         // Restore passthrough state if we changed it
         if (!was_enabled) {
             print("\nRestoring passthrough to off...\n", .{});
-            _ = std.process.Child.run(.{
-                .allocator = std.heap.page_allocator,
+            _ = std.process.run(std.heap.page_allocator, io, .{
                 .argv = &.{ "tmux", "set", "-p", "allow-passthrough", "off" },
             }) catch {};
 
             // Verify restoration
-            const restore_result = std.process.Child.run(.{
-                .allocator = std.heap.page_allocator,
+            const restore_result = std.process.run(std.heap.page_allocator, io, .{
                 .argv = &.{ "tmux", "show", "-p", "allow-passthrough" },
             }) catch {
                 print("(could not verify restoration)\n", .{});
@@ -480,7 +486,7 @@ fn queryXtversionViaTmux(fd: posix.fd_t, timeout_ms: i32, debug: bool) ?[]const 
         print("\n", .{});
     }
 
-    _ = posix.write(fd, query) catch return null;
+    writeFd(fd, query) catch return null;
 
     var fds = [_]posix.pollfd{.{
         .fd = fd,
@@ -538,7 +544,7 @@ fn queryDA1ViaTmux(fd: posix.fd_t, timeout_ms: i32, debug: bool) ?[]const u8 {
         print("\n", .{});
     }
 
-    _ = posix.write(fd, query) catch return null;
+    writeFd(fd, query) catch return null;
 
     var fds = [_]posix.pollfd{.{
         .fd = fd,
@@ -602,7 +608,7 @@ fn queryOuterTerminalViaTmux(fd: posix.fd_t, timeout_ms: i32, debug: bool) Color
         print("\n", .{});
     }
 
-    _ = posix.write(fd, query) catch return result;
+    writeFd(fd, query) catch return result;
 
     var fds = [_]posix.pollfd{.{
         .fd = fd,

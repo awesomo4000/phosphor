@@ -1,5 +1,4 @@
 const std = @import("std");
-const fs = std.fs;
 const posix = std.posix;
 
 // Terminal state management
@@ -31,6 +30,13 @@ pub const Color = struct {
 
 // Terminal state (managed by TerminalState module)
 var terminal_state: ?TerminalState = null;
+
+// Io instance used for stdout writes, set by init()
+var tui_io: ?std.Io = null;
+
+fn stdoutWriter() std.Io.File.Writer {
+    return std.Io.File.stdout().writer(tui_io.?, &stdout_buffer);
+}
 
 // Current colors
 var current_fg: u8 = Color.WHITE;
@@ -93,7 +99,9 @@ pub fn drawSizeIndicator(size: Size) !void {
 }
 
 // Initialize TUI with optional default background color
-pub fn init() !void {
+pub fn init(io: std.Io) !void {
+    tui_io = io;
+
     // Initialize terminal state (saves original termios, installs signal handlers)
     terminal_state = TerminalState.init() catch |err| {
         if (err == error.NotATerminal) {
@@ -115,10 +123,10 @@ pub fn init() !void {
 }
 
 // Initialize TUI with specific default colors
-pub fn initWithColors(default_fg: u8, default_bg: u8) !void {
+pub fn initWithColors(io: std.Io, default_fg: u8, default_bg: u8) !void {
     current_fg = default_fg;
     current_bg = default_bg;
-    try init();
+    try init(io);
     try setColor(default_fg, default_bg);
 }
 
@@ -132,7 +140,7 @@ pub fn deinit() void {
 
 // Clear screen
 pub fn clearScreen() !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     try stdout.print("{s}2J{s}H", .{ CSI, CSI });
     try stdout.flush();
@@ -140,7 +148,7 @@ pub fn clearScreen() !void {
 
 // Show/hide cursor
 pub fn showCursor(visible: bool) !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     if (visible) {
         try stdout.print("{s}?25h", .{CSI});
@@ -175,7 +183,7 @@ pub fn enableBracketedPaste() void {
 
 // Move cursor to position using x,y coordinates (0-based)
 pub fn moveTo(x: u16, y: u16) !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     // Terminal uses 1-based indexing and row,col order, so convert
     try stdout.print("{s}{d};{d}H", .{ CSI, y + 1, x + 1 });
@@ -195,7 +203,7 @@ const kCgaToAnsi = [16]u8{
 
 // Set foreground and background colors
 pub fn setColor(fg: u8, bg: u8) !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     const fg_code = kCgaToAnsi[fg & 0x0F];
     const bg_code = kCgaToAnsi[bg & 0x0F] + 10;
@@ -217,7 +225,7 @@ pub fn getCurrentForeground() u8 {
 
 // Reset all attributes
 pub fn resetAttributes() !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     try stdout.print("{s}0m", .{CSI});
     try stdout.flush();
@@ -225,18 +233,18 @@ pub fn resetAttributes() !void {
 
 // Get terminal size using ioctl (reliable, doesn't interfere with stdin)
 pub fn getSize() Size {
-    const stdin = std.fs.File.stdin();
+    const stdin = posix.STDIN_FILENO;
     var winsize: std.posix.winsize = undefined;
 
     // Platform-specific ioctl
     const builtin = @import("builtin");
     switch (builtin.os.tag) {
         .linux => {
-            _ = std.os.linux.ioctl(stdin.handle, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize));
+            _ = std.os.linux.ioctl(stdin, std.os.linux.T.IOCGWINSZ, @intFromPtr(&winsize));
         },
         .macos => {
             const TIOCGWINSZ = 0x40087468; // macOS specific value
-            _ = std.c.ioctl(stdin.handle, TIOCGWINSZ, @intFromPtr(&winsize));
+            _ = std.c.ioctl(stdin, TIOCGWINSZ, @intFromPtr(&winsize));
         },
         else => {
             return .{ .rows = 24, .cols = 80 };
@@ -253,35 +261,34 @@ pub fn getSize() Size {
 
 // Wait for a single keypress
 pub fn readKey() !u8 {
-    const stdin = std.fs.File.stdin();
     var buf: [1]u8 = undefined;
-    _ = try stdin.read(&buf);
+    _ = try posix.read(posix.STDIN_FILENO, &buf);
     return buf[0];
 }
 
 // Read a key without blocking (returns null if no key available)
 pub fn readKeyNonBlocking() !?u8 {
-    const stdin = std.fs.File.stdin();
-    
+    const stdin = posix.STDIN_FILENO;
+
     // Use poll to check if data is available
     var pfd = [_]posix.pollfd{.{
-        .fd = stdin.handle,
+        .fd = stdin,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
-    
+
     const ready = try posix.poll(&pfd, 0); // 0 timeout = non-blocking
     if (ready == 0) return null;
-    
+
     var buf: [1]u8 = undefined;
-    const bytes_read = try stdin.read(&buf);
+    const bytes_read = try posix.read(stdin, &buf);
     if (bytes_read == 0) return null;
     return buf[0];
 }
 
 // Print text at current cursor position
 pub fn print(comptime fmt: []const u8, args: anytype) !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     try stdout.print(fmt, args);
     try stdout.flush();
@@ -289,7 +296,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) !void {
 
 // Print simple text without formatting
 pub fn printText(text: []const u8) !void {
-    var writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var writer = stdoutWriter();
     const stdout = &writer.interface;
     try stdout.writeAll(text);
     try stdout.flush();
@@ -297,8 +304,7 @@ pub fn printText(text: []const u8) !void {
 
 // Flush output buffer
 pub fn flush() !void {
-    const stdout = std.fs.File.stdout();
-    try stdout.sync();
+    try std.Io.File.stdout().sync(tui_io.?);
 }
 
 // Box drawing options

@@ -185,11 +185,8 @@ pub fn subs(_: *Model) app.Subs {
 // Main
 // ─────────────────────────────────────────────────────────────
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    try app.App(@This()).run(gpa.allocator(), .{
+pub fn main(proc: std.process.Init) !void {
+    try app.App(@This()).run(proc, .{
         .backend = .thermite_threaded,
         .target_fps = 30,
     });

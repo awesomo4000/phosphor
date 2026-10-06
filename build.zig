@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     unicode.addImport("zg", zg_dep.module("DisplayWidth"));
+    unicode.addImport("Graphemes", zg_dep.module("Graphemes"));
 
     // Phosphor module (high-level TUI framework)
     const phosphor = b.addModule("phosphor", .{

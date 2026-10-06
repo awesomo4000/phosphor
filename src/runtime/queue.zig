@@ -13,13 +13,15 @@ pub fn Queue(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        items: std.ArrayListUnmanaged(T) = .{},
+        items: std.ArrayListUnmanaged(T) = .empty,
         allocator: Allocator,
-        mutex: std.Thread.Mutex = .{},
+        io: std.Io,
+        mutex: std.Io.Mutex = .init,
 
-        pub fn init(allocator: Allocator) Self {
+        pub fn init(allocator: Allocator, io: std.Io) Self {
             return .{
                 .allocator = allocator,
+                .io = io,
             };
         }
 
@@ -29,23 +31,23 @@ pub fn Queue(comptime T: type) type {
 
         /// Push a single item (thread-safe)
         pub fn push(self: *Self, item: T) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             self.items.append(self.allocator, item) catch {};
         }
 
         /// Push multiple items (thread-safe) - useful for test injection
         pub fn pushSlice(self: *Self, items: []const T) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             self.items.appendSlice(self.allocator, items) catch {};
         }
 
         /// Drain all items into provided buffer, returns slice of drained items.
         /// Clears the queue. (thread-safe)
         pub fn drain(self: *Self, out: []T) []T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             const count = @min(self.items.items.len, out.len);
             @memcpy(out[0..count], self.items.items[0..count]);
@@ -55,8 +57,8 @@ pub fn Queue(comptime T: type) type {
 
         /// Drain all items, allocating the result (thread-safe)
         pub fn drainAlloc(self: *Self, allocator: Allocator) ![]T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             const result = try allocator.dupe(T, self.items.items);
             self.items.clearRetainingCapacity();
@@ -65,8 +67,8 @@ pub fn Queue(comptime T: type) type {
 
         /// Get current length (thread-safe) - useful for tests
         pub fn len(self: *Self) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             return self.items.items.len;
         }
 
@@ -77,16 +79,16 @@ pub fn Queue(comptime T: type) type {
 
         /// Clear all items (thread-safe)
         pub fn clear(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             self.items.clearRetainingCapacity();
         }
 
         /// Pop a single item if available (thread-safe)
         /// Useful for non-batched processing
         pub fn pop(self: *Self) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             return self.items.pop();
         }
 
@@ -103,7 +105,7 @@ pub fn Queue(comptime T: type) type {
 // ─────────────────────────────────────────────────────────────
 
 test "Queue: basic push and drain" {
-    var q = Queue(u32).init(std.testing.allocator);
+    var q = Queue(u32).init(std.testing.allocator, std.testing.io);
     defer q.deinit();
 
     q.push(1);
@@ -123,7 +125,7 @@ test "Queue: basic push and drain" {
 }
 
 test "Queue: pushSlice for test injection" {
-    var q = Queue(u32).init(std.testing.allocator);
+    var q = Queue(u32).init(std.testing.allocator, std.testing.io);
     defer q.deinit();
 
     const inject = [_]u32{ 10, 20, 30 };
@@ -137,7 +139,7 @@ test "Queue: pushSlice for test injection" {
 }
 
 test "Queue: pop single items" {
-    var q = Queue(u32).init(std.testing.allocator);
+    var q = Queue(u32).init(std.testing.allocator, std.testing.io);
     defer q.deinit();
 
     q.push(1);
@@ -149,7 +151,7 @@ test "Queue: pop single items" {
 }
 
 test "Queue: drainAlloc" {
-    var q = Queue(u32).init(std.testing.allocator);
+    var q = Queue(u32).init(std.testing.allocator, std.testing.io);
     defer q.deinit();
 
     q.push(1);
@@ -163,7 +165,7 @@ test "Queue: drainAlloc" {
 }
 
 test "Queue: thread safety" {
-    var q = Queue(u32).init(std.testing.allocator);
+    var q = Queue(u32).init(std.testing.allocator, std.testing.io);
     defer q.deinit();
 
     const num_threads = 4;

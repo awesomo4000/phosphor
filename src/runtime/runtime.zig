@@ -33,14 +33,14 @@ pub const Config = struct {
 
 /// Time source - can be real or mocked for testing
 pub const TimeSource = union(enum) {
-    real,
+    real: std.Io,
     mocked: struct {
         current_ms: i64 = 0,
     },
 
     pub fn now(self: *TimeSource) i64 {
         return switch (self.*) {
-            .real => std.time.milliTimestamp(),
+            .real => |io| std.Io.Timestamp.now(io, .real).toMilliseconds(),
             .mocked => |m| m.current_ms,
         };
     }
@@ -72,6 +72,7 @@ pub fn Runtime(comptime Msg: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        io: std.Io,
         queue: Queue(Msg),
         config: Config,
         time: TimeSource,
@@ -85,12 +86,13 @@ pub fn Runtime(comptime Msg: type) type {
         // Thread handle (null in headless mode)
         input_thread: ?std.Thread = null,
 
-        pub fn init(allocator: Allocator, config: Config) Self {
+        pub fn init(allocator: Allocator, io: std.Io, config: Config) Self {
             return .{
                 .allocator = allocator,
-                .queue = Queue(Msg).init(allocator),
+                .io = io,
+                .queue = Queue(Msg).init(allocator, io),
                 .config = config,
-                .time = if (config.headless) .{ .mocked = .{} } else .real,
+                .time = if (config.headless) .{ .mocked = .{} } else .{ .real = io },
                 .size = config.initial_size,
             };
         }
@@ -174,7 +176,7 @@ pub fn Runtime(comptime Msg: type) type {
 
             if (!self.config.headless) {
                 // Initialize terminal input
-                self.input = .{ .terminal = try TerminalInput.init() };
+                self.input = .{ .terminal = try TerminalInput.init(self.io) };
 
                 // Start input thread
                 self.input_thread = try std.Thread.spawn(.{}, inputThreadFn, .{self});
@@ -215,7 +217,7 @@ pub fn Runtime(comptime Msg: type) type {
                     const frame_time_ms: i64 = @divFloor(1000, self.config.target_fps);
                     const elapsed = self.time.now() - ctx.time_ms;
                     if (elapsed < frame_time_ms) {
-                        std.Thread.sleep(@intCast((frame_time_ms - elapsed) * std.time.ns_per_ms));
+                        self.io.sleep(.fromMilliseconds(frame_time_ms - elapsed), .awake) catch {};
                     }
                 }
             }
@@ -281,7 +283,7 @@ pub fn Runtime(comptime Msg: type) type {
                     }
                 } else {
                     // Headless mode - just sleep
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    self.io.sleep(.fromMilliseconds(10), .awake) catch {};
                 }
             }
         }
@@ -314,7 +316,7 @@ test "Runtime: basic initialization" {
         key: Key,
     };
 
-    var rt = Runtime(TestMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(TestMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), rt.frame);
@@ -327,7 +329,7 @@ test "Runtime: message injection and drain" {
         key: Key,
     };
 
-    var rt = Runtime(TestMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(TestMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     rt.send(.tick);
@@ -347,7 +349,7 @@ test "Runtime: message injection and drain" {
 test "Runtime: mocked time" {
     const TestMsg = union(enum) { tick };
 
-    var rt = Runtime(TestMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(TestMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     rt.setTime(1000);
@@ -367,7 +369,7 @@ test "Runtime: step execution" {
         count: u32 = 0,
     };
 
-    var rt = Runtime(TestMsg).init(std.testing.allocator, .{ .headless = true });
+    var rt = Runtime(TestMsg).init(std.testing.allocator, std.testing.io, .{ .headless = true });
     defer rt.deinit();
 
     var model = Model{};
@@ -403,7 +405,7 @@ test "Runtime: step execution" {
 test "Runtime: context snapshot" {
     const TestMsg = union(enum) { tick };
 
-    var rt = Runtime(TestMsg).init(std.testing.allocator, .{
+    var rt = Runtime(TestMsg).init(std.testing.allocator, std.testing.io, .{
         .headless = true,
         .initial_size = .{ .w = 120, .h = 40 },
     });

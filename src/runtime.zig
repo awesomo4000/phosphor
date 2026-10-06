@@ -144,7 +144,7 @@ test "Runtime basic operation" {
 
         .view = struct {
             fn view(state: *const TestState, allocator: std.mem.Allocator) ![]DrawCommand {
-                var commands: std.ArrayListUnmanaged(DrawCommand) = .{};
+                var commands: std.ArrayListUnmanaged(DrawCommand) = .empty;
 
                 try commands.append(allocator, .clear_screen);
                 try commands.append(allocator, .{ .move_cursor = .{ .x = 0, .y = 0 } });

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const thermite = @import("thermite");
 const phosphor = @import("phosphor");
@@ -73,7 +74,7 @@ pub const Size = struct {
 /// });
 /// ```
 pub fn wrap(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) WrapFn(Msg, tag) {
-    const Payload = std.meta.TagPayload(Msg, tag);
+    const Payload = @FieldType(Msg, @tagName(tag));
     return struct {
         fn f(payload: Payload) Msg {
             return @unionInit(Msg, @tagName(tag), payload);
@@ -83,7 +84,7 @@ pub fn wrap(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) WrapFn(Msg, tag
 
 /// Return type for wrap() - a function from payload to message
 fn WrapFn(comptime Msg: type, comptime tag: std.meta.Tag(Msg)) type {
-    const Payload = std.meta.TagPayload(Msg, tag);
+    const Payload = @FieldType(Msg, @tagName(tag));
     return *const fn (Payload) Msg;
 }
 
@@ -109,7 +110,7 @@ pub fn wrapWith(
     comptime transformer: anytype,
 ) WrapWithFn(@TypeOf(transformer), Msg) {
     const TransformFn = @TypeOf(transformer);
-    const Input = @typeInfo(TransformFn).@"fn".params[0].type.?;
+    const Input = @typeInfo(TransformFn).@"fn".param_types[0].?;
 
     return struct {
         fn f(input: Input) Msg {
@@ -121,7 +122,7 @@ pub fn wrapWith(
 
 /// Return type for wrapWith()
 fn WrapWithFn(comptime TransformFn: type, comptime Msg: type) type {
-    const Input = @typeInfo(TransformFn).@"fn".params[0].type.?;
+    const Input = @typeInfo(TransformFn).@"fn".param_types[0].?;
     return *const fn (Input) Msg;
 }
 
@@ -143,31 +144,22 @@ fn WrapWithFn(comptime TransformFn: type, comptime Msg: type) type {
 /// }
 /// ```
 pub fn MsgMapper(comptime ParentMsg: type, comptime ChildMsg: type) type {
-    const child_fields = @typeInfo(ChildMsg).@"union".fields;
+    const child_info = @typeInfo(ChildMsg).@"union";
 
     // Build struct fields for each child message variant
-    var fields: [child_fields.len]std.builtin.Type.StructField = undefined;
-    for (child_fields, 0..) |field, i| {
-        const MapperFn = if (field.type == void)
+    var field_types: [child_info.field_names.len]type = undefined;
+    var field_attrs: [child_info.field_names.len]std.lang.Type.Struct.FieldAttributes = undefined;
+    for (child_info.field_types, 0..) |FieldType, i| {
+        const MapperFn = if (FieldType == void)
             ?*const fn () ParentMsg
         else
-            ?*const fn (field.type) ParentMsg;
+            ?*const fn (FieldType) ParentMsg;
 
-        fields[i] = .{
-            .name = field.name,
-            .type = MapperFn,
-            .default_value_ptr = @ptrCast(&@as(MapperFn, null)),
-            .is_comptime = false,
-            .alignment = @alignOf(MapperFn),
-        };
+        field_types[i] = MapperFn;
+        field_attrs[i] = .{ .default_value_ptr = @ptrCast(&@as(MapperFn, null)) };
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, child_info.field_names, &field_types, &field_attrs);
 }
 
 /// Wrap a void variant - creates a function that takes nothing and returns the message.
@@ -379,10 +371,10 @@ pub const Ui = struct {
 
         if (child_info == .@"struct" and child_info.@"struct".is_tuple) {
             // Tuple of LayoutNodes
-            const fields = child_info.@"struct".fields;
-            const nodes = self.ally.alloc(LayoutNode, fields.len) catch @panic("OOM");
-            inline for (fields, 0..) |field, i| {
-                nodes[i] = @field(children, field.name);
+            const field_names = child_info.@"struct".field_names;
+            const nodes = self.ally.alloc(LayoutNode, field_names.len) catch @panic("OOM");
+            inline for (field_names, 0..) |name, i| {
+                nodes[i] = @field(children, name);
             }
             return .{ .direction = direction, .content = .{ .children = nodes } };
         } else {
@@ -533,15 +525,15 @@ pub fn App(comptime Module: type) type {
     // Infer Model from init() return type
     const InitFn = @TypeOf(Module.init);
     const init_info = @typeInfo(InitFn).@"fn";
-    const init_params = init_info.params;
-    const init_takes_allocator = init_params.len > 0 and init_params[0].type.? == Allocator;
+    const init_params = init_info.param_types;
+    const init_takes_allocator = init_params.len > 0 and init_params[0].? == Allocator;
     const Model = init_info.return_type.?;
 
     // Infer Msg from update() second param
     const UpdateFn = @TypeOf(Module.update);
     const update_info = @typeInfo(UpdateFn).@"fn";
-    const update_params = update_info.params;
-    const Msg = update_params[1].type.?;
+    const update_params = update_info.param_types;
+    const Msg = update_params[1].?;
 
     // Check if update() returns Effect(Msg) or legacy Cmd
     const UpdateReturnType = update_info.return_type.?;
@@ -549,10 +541,9 @@ pub fn App(comptime Module: type) type {
 
     return struct {
         /// Run the app with options
-        pub fn run(allocator: Allocator, options: RunOptions) !void {
-            // Initialize unicode display width tables (used by widgets for text measurement)
-            try phosphor.unicode.init(allocator);
-            defer phosphor.unicode.deinit(allocator);
+        pub fn run(init: std.process.Init, options: RunOptions) !void {
+            const allocator = init.gpa;
+            const io = init.io;
 
             var model = if (init_takes_allocator)
                 Module.init(allocator)
@@ -562,8 +553,8 @@ pub fn App(comptime Module: type) type {
             defer if (@hasDecl(Model, "deinit")) {
                 // Check if deinit takes allocator
                 const DeinitFn = @TypeOf(Model.deinit);
-                const deinit_params = @typeInfo(DeinitFn).@"fn".params;
-                if (deinit_params.len > 1 and deinit_params[1].type.? == Allocator) {
+                const deinit_params = @typeInfo(DeinitFn).@"fn".param_types;
+                if (deinit_params.len > 1 and deinit_params[1].? == Allocator) {
                     model.deinit(allocator);
                 } else {
                     model.deinit();
@@ -571,20 +562,20 @@ pub fn App(comptime Module: type) type {
             };
 
             return switch (options.backend) {
-                .simple => runSimple(allocator, &model, options),
-                .thermite => runThermite(allocator, &model, options),
-                .thermite_threaded => runThermiteThreaded(allocator, &model, options),
+                .simple => runSimple(allocator, io, &model, options),
+                .thermite => runThermite(allocator, io, init.environ_map, &model, options),
+                .thermite_threaded => runThermiteThreaded(allocator, io, init.environ_map, &model, options),
             };
         }
 
         /// Run with simple backend (half-block rendering)
-        fn runSimple(allocator: Allocator, model: *Model, options: RunOptions) !void {
+        fn runSimple(allocator: Allocator, io: Io, model: *Model, options: RunOptions) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
 
             // Terminal setup
-            var term = try Terminal.init();
+            var term = try Terminal.init(io);
             defer term.deinit();
 
             // Screen buffer for rendering
@@ -595,7 +586,7 @@ pub fn App(comptime Module: type) type {
             var ui = Ui{ .ally = frame_arena.allocator() };
 
             // Timing
-            var last_frame = std.time.milliTimestamp();
+            var last_frame = milliTimestamp(io);
 
             // Send initial resize
             if (shouldQuit(callUpdate(model, msgFromResize(Msg, term.width, term.height), allocator), model, allocator)) return;
@@ -609,7 +600,7 @@ pub fn App(comptime Module: type) type {
 
                 // Block if not animating - saves CPU
                 if (!subs.animation_frame) {
-                    term.waitForEvent();
+                    term.waitForEvent(io);
                 }
 
                 // Check for terminal resize (SIGWINCH)
@@ -645,7 +636,7 @@ pub fn App(comptime Module: type) type {
                 }
 
                 // Update timing (always, to avoid jumps after pause)
-                const now = std.time.milliTimestamp();
+                const now = milliTimestamp(io);
                 const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
                 last_frame = now;
 
@@ -671,23 +662,23 @@ pub fn App(comptime Module: type) type {
 
                 // Frame pacing
                 if (subs.animation_frame) {
-                    const frame_time = std.time.milliTimestamp() - last_frame;
+                    const frame_time = milliTimestamp(io) - last_frame;
                     const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
-                        std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                        io.sleep(.fromMilliseconds(target - frame_time), .awake) catch {};
                     }
                 }
             }
         }
 
         /// Run with thermite backend (optimized 2x2 block rendering)
-        fn runThermite(allocator: Allocator, model: *Model, options: RunOptions) !void {
+        fn runThermite(allocator: Allocator, io: Io, env: *const std.process.Environ.Map, model: *Model, options: RunOptions) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
 
             // Initialize thermite renderer
-            const renderer = try thermite.Renderer.init(allocator);
+            const renderer = try thermite.Renderer.init(allocator, io, env);
             defer renderer.deinit();
 
             // Install signal handlers (SIGINT cleanup + SIGWINCH resize)
@@ -697,7 +688,7 @@ pub fn App(comptime Module: type) type {
             var ui = Ui{ .ally = frame_arena.allocator() };
 
             // Timing
-            var last_frame = std.time.milliTimestamp();
+            var last_frame = milliTimestamp(io);
 
             // Build initial view to detect type (layout vs canvas)
             var root = Module.view(model, &ui);
@@ -723,7 +714,7 @@ pub fn App(comptime Module: type) type {
                 // Input handling
                 if (subs.animation_frame) {
                     // Non-blocking key check when animating
-                    if (thermite.terminal.readKeyEvent(term_fd)) |key| {
+                    if (thermite.terminal.readKeyEvent(io, term_fd)) |key| {
                         if (findKeyHandler(root)) |handler| {
                             const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                             if (shouldQuit(callUpdate(model, typed_handler(key), allocator), model, allocator)) return;
@@ -735,7 +726,7 @@ pub fn App(comptime Module: type) type {
                     // Blocking poll when not animating
                     switch (thermite.terminal.pollInput(term_fd, 100) catch .timeout) {
                         .ready => {
-                            if (thermite.terminal.readKeyEvent(term_fd)) |key| {
+                            if (thermite.terminal.readKeyEvent(io, term_fd)) |key| {
                                 if (findKeyHandler(root)) |handler| {
                                     const typed_handler: *const fn (Key) Msg = @ptrCast(@alignCast(handler));
                                     if (shouldQuit(callUpdate(model, typed_handler(key), allocator), model, allocator)) return;
@@ -770,7 +761,7 @@ pub fn App(comptime Module: type) type {
                 }
 
                 // Update timing
-                const now = std.time.milliTimestamp();
+                const now = milliTimestamp(io);
                 const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
                 last_frame = now;
 
@@ -797,7 +788,7 @@ pub fn App(comptime Module: type) type {
                     try renderer.presentOptimized();
 
                     if (ref.overlay_text) |text| {
-                        drawOverlayText(renderer.ttyfd, renderer.term_width, renderer.term_height, text);
+                        drawOverlayText(io, renderer.ttyfd, renderer.term_width, renderer.term_height, text);
                     }
                 } else if (findLayoutRef(root)) |ref| {
                     // Layout: render text via draw commands
@@ -831,13 +822,13 @@ pub fn App(comptime Module: type) type {
                     if (findCursorInCommands(render_result.commands)) |cursor| {
                         var pos_buf: [32]u8 = undefined;
                         const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cursor.y + 1, cursor.x + 1 }) catch continue;
-                        _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                        thermite.terminal.writeAll(io, renderer.ttyfd, pos_seq) catch {};
                     } else if (ref.cursor_x) |cx| {
                         // Legacy: use explicit cursor position from layoutWithCursor
                         if (ref.cursor_y) |cy| {
                             var pos_buf: [32]u8 = undefined;
                             const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cy + 1, cx + 1 }) catch continue;
-                            _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                            thermite.terminal.writeAll(io, renderer.ttyfd, pos_seq) catch {};
                         }
                     }
 
@@ -848,30 +839,30 @@ pub fn App(comptime Module: type) type {
 
                 // Frame pacing
                 if (subs.animation_frame) {
-                    const frame_time = std.time.milliTimestamp() - now;
+                    const frame_time = milliTimestamp(io) - now;
                     const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
-                        std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                        io.sleep(.fromMilliseconds(target - frame_time), .awake) catch {};
                     }
                 }
             }
         }
 
         /// Run with thermite backend + threaded input (queue-based)
-        fn runThermiteThreaded(allocator: Allocator, model: *Model, options: RunOptions) !void {
+        fn runThermiteThreaded(allocator: Allocator, io: Io, env: *const std.process.Environ.Map, model: *Model, options: RunOptions) !void {
             // Frame arena for view nodes
             var frame_arena = std.heap.ArenaAllocator.init(allocator);
             defer frame_arena.deinit();
 
             // Initialize thermite renderer
-            const renderer = try thermite.Renderer.init(allocator);
+            const renderer = try thermite.Renderer.init(allocator, io, env);
             defer renderer.deinit();
 
             // Install signal handlers (SIGINT cleanup + SIGWINCH resize)
             thermite.terminal.installSignalHandlers(renderer.getTerminalFd());
 
             // Message queue for threaded input
-            var queue = Queue(Msg).init(allocator);
+            var queue = Queue(Msg).init(allocator, io);
             defer queue.deinit();
 
             // Shared state for input thread
@@ -887,7 +878,7 @@ pub fn App(comptime Module: type) type {
             defer {
                 running.store(false, .release);
                 // Wake the blocking poll by sending DSR - terminal responds, unblocking read
-                thermite.terminal.wakeReader(term_fd);
+                thermite.terminal.wakeReader(io, term_fd);
                 input_thread.join();
             }
 
@@ -895,7 +886,7 @@ pub fn App(comptime Module: type) type {
             var ui = Ui{ .ally = frame_arena.allocator() };
 
             // Timing
-            var last_frame = std.time.milliTimestamp();
+            var last_frame = milliTimestamp(io);
 
             // Build initial view to detect type (layout vs canvas)
             var root = Module.view(model, &ui);
@@ -906,7 +897,7 @@ pub fn App(comptime Module: type) type {
             const initial_height: u32 = if (is_layout) renderer.term_height else renderer.term_height * 2;
 
             // Effects list - reused each frame
-            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .{};
+            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .empty;
             defer effects.deinit(allocator);
 
             // Send initial resize
@@ -936,7 +927,7 @@ pub fn App(comptime Module: type) type {
 
                 // Check if resumed from SIGSTOP/SIGTSTP - restore terminal state
                 if (thermite.terminal.checkContinue()) {
-                    thermite.terminal.enterRawMode(renderer.ttyfd) catch {};
+                    thermite.terminal.enterRawMode(io, renderer.ttyfd) catch {};
                     renderer.forceFullRedraw();
                 }
 
@@ -960,7 +951,7 @@ pub fn App(comptime Module: type) type {
                 }
 
                 // Update timing
-                const now = std.time.milliTimestamp();
+                const now = milliTimestamp(io);
                 const dt = @as(f32, @floatFromInt(now - last_frame)) / 1000.0;
                 last_frame = now;
 
@@ -991,7 +982,7 @@ pub fn App(comptime Module: type) type {
                     try renderer.presentOptimized();
 
                     if (ref.overlay_text) |text| {
-                        drawOverlayText(renderer.ttyfd, renderer.term_width, renderer.term_height, text);
+                        drawOverlayText(io, renderer.ttyfd, renderer.term_width, renderer.term_height, text);
                     }
                 } else if (findLayoutRef(root)) |ref| {
                     renderer.clearBackBuffer();
@@ -1017,12 +1008,12 @@ pub fn App(comptime Module: type) type {
                     if (findCursorInCommands(render_result.commands)) |cursor| {
                         var pos_buf: [32]u8 = undefined;
                         const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cursor.y + 1, cursor.x + 1 }) catch continue;
-                        _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                        thermite.terminal.writeAll(io, renderer.ttyfd, pos_seq) catch {};
                     } else if (ref.cursor_x) |cx| {
                         if (ref.cursor_y) |cy| {
                             var pos_buf: [32]u8 = undefined;
                             const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H\x1b[?25h", .{ cy + 1, cx + 1 }) catch continue;
-                            _ = std.posix.write(renderer.ttyfd, pos_seq) catch {};
+                            thermite.terminal.writeAll(io, renderer.ttyfd, pos_seq) catch {};
                         }
                     }
 
@@ -1031,14 +1022,14 @@ pub fn App(comptime Module: type) type {
 
                 // Frame pacing
                 if (subs.animation_frame) {
-                    const frame_time = std.time.milliTimestamp() - now;
+                    const frame_time = milliTimestamp(io) - now;
                     const target: i64 = if (options.target_fps == 0) 1 else @divFloor(1000, options.target_fps);
                     if (frame_time < target) {
-                        std.Thread.sleep(@intCast((target - frame_time) * std.time.ns_per_ms));
+                        io.sleep(.fromMilliseconds(target - frame_time), .awake) catch {};
                     }
                 } else {
                     // When not animating, sleep a bit to avoid busy-waiting
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    io.sleep(.fromMilliseconds(10), .awake) catch {};
                 }
             }
         }
@@ -1269,7 +1260,7 @@ pub fn App(comptime Module: type) type {
 
         /// Legacy helper for simpler runtimes that don't need full effect processing
         fn shouldQuit(effect: Effect(Msg), model: *Model, allocator: Allocator) bool {
-            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .{};
+            var effects: std.ArrayListUnmanaged(Effect(Msg)) = .empty;
             defer effects.deinit(allocator);
             effects.append(allocator, effect) catch return false;
             var after_paint: ?Effect(Msg).AfterPaint = null;
@@ -1340,7 +1331,7 @@ pub fn App(comptime Module: type) type {
 
         /// Execute after-paint effect (cursor positioning, etc.)
         /// widget_positions is used to resolve Effect.set_cursor coordinates
-        fn executeAfterPaint(ap: Effect(Msg).AfterPaint, fd: i32, widget_positions: []const WidgetPosition) void {
+        fn executeAfterPaint(io: Io, ap: Effect(Msg).AfterPaint, fd: i32, widget_positions: []const WidgetPosition) void {
             switch (ap) {
                 .set_cursor => |c| {
                     // Look up widget position from layout
@@ -1358,13 +1349,13 @@ pub fn App(comptime Module: type) type {
 
                     var buf: [32]u8 = undefined;
                     const seq = std.fmt.bufPrint(&buf, "\x1b[{};{}H\x1b[?25h", .{ abs_y + 1, abs_x + 1 }) catch return;
-                    _ = std.posix.write(fd, seq) catch {};
+                    thermite.terminal.writeAll(io, fd, seq) catch {};
                 },
                 .show_cursor => {
-                    _ = std.posix.write(fd, "\x1b[?25h") catch {};
+                    thermite.terminal.writeAll(io, fd, "\x1b[?25h") catch {};
                 },
                 .hide_cursor => {
-                    _ = std.posix.write(fd, "\x1b[?25l") catch {};
+                    thermite.terminal.writeAll(io, fd, "\x1b[?25l") catch {};
                 },
             }
         }
@@ -1390,28 +1381,28 @@ pub fn App(comptime Module: type) type {
         }
 
         /// Draw overlay text at bottom of terminal (status bar)
-        fn drawOverlayText(fd: i32, term_width: u32, term_height: u32, text: []const u8) void {
+        fn drawOverlayText(io: Io, fd: i32, term_width: u32, term_height: u32, text: []const u8) void {
             if (term_width < 10 or term_height < 3) return;
 
             var buf: [32]u8 = undefined;
             // Move to bottom row, white on black
             const prefix = std.fmt.bufPrint(&buf, "\x1b[{};1H\x1b[97;40m", .{term_height}) catch return;
-            _ = std.posix.write(fd, prefix) catch {};
+            thermite.terminal.writeAll(io, fd, prefix) catch {};
 
             // Write text (truncated to terminal width)
             const write_len = @min(text.len, term_width);
-            _ = std.posix.write(fd, text[0..write_len]) catch {};
+            thermite.terminal.writeAll(io, fd, text[0..write_len]) catch {};
 
             // Fill rest of line with spaces
             if (term_width > write_len) {
                 var spaces: [256]u8 = undefined;
                 const fill_len = @min(term_width - write_len, 256);
                 @memset(spaces[0..fill_len], ' ');
-                _ = std.posix.write(fd, spaces[0..fill_len]) catch {};
+                thermite.terminal.writeAll(io, fd, spaces[0..fill_len]) catch {};
             }
 
             // Reset colors
-            _ = std.posix.write(fd, "\x1b[0m") catch {};
+            thermite.terminal.writeAll(io, fd, "\x1b[0m") catch {};
         }
 
         fn renderToScreen(screen: *ScreenBuffer, root: *Node, width: u32, height: u32) void {
@@ -1462,6 +1453,11 @@ pub fn App(comptime Module: type) type {
     };
 }
 
+/// Monotonic milliseconds for frame timing
+fn milliTimestamp(io: Io) i64 {
+    return Io.Timestamp.now(io, .awake).toMilliseconds();
+}
+
 // ============================================
 // Terminal abstraction (minimal for now)
 // ============================================
@@ -1471,30 +1467,28 @@ var g_resize_pending: bool = false;
 var g_terminal_fd: ?std.posix.fd_t = null;
 
 const Terminal = struct {
+    io: Io,
     fd: std.posix.fd_t,
     width: u32,
     height: u32,
     original_termios: ?std.posix.termios,
-
-    const TIOCGWINSZ = if (@import("builtin").os.tag == .macos) 0x40087468 else 0x5413;
 
     pub const Event = union(enum) {
         key: Key,
         resize: struct { w: u32, h: u32 },
     };
 
-    pub fn init() !Terminal {
+    pub fn init(io: Io) !Terminal {
         // Open /dev/tty directly for terminal control
-        const fd = try std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
+        const fd = try thermite.terminal.openTty(io);
 
         // Store fd for signal handler
         g_terminal_fd = fd;
 
         // Get terminal size
-        var size = std.posix.winsize{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-        _ = std.c.ioctl(fd, TIOCGWINSZ, @intFromPtr(&size));
-        const width: u32 = if (size.col > 0) size.col else 80;
-        const height: u32 = if (size.row > 0) size.row else 24;
+        const size = thermite.terminal.getCurrentSize(fd);
+        const width: u32 = if (size) |sz| sz.width else 80;
+        const height: u32 = if (size) |sz| sz.height else 24;
 
         // Enter raw mode
         const original = try std.posix.tcgetattr(fd);
@@ -1515,9 +1509,10 @@ const Terminal = struct {
         std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
 
         // Enter alt screen, hide cursor
-        _ = try std.posix.write(fd, "\x1b[?1049h\x1b[?25l");
+        try thermite.terminal.writeAll(io, fd, "\x1b[?1049h\x1b[?25l");
 
         return .{
+            .io = io,
             .fd = fd,
             .width = width,
             .height = height,
@@ -1525,7 +1520,7 @@ const Terminal = struct {
         };
     }
 
-    fn handleSigwinch(_: c_int) callconv(.c) void {
+    fn handleSigwinch(_: std.posix.SIG) callconv(.c) void {
         g_resize_pending = true;
     }
 
@@ -1534,11 +1529,11 @@ const Terminal = struct {
         g_terminal_fd = null;
 
         // Restore terminal
-        _ = std.posix.write(self.fd, "\x1b[?25h\x1b[?1049l") catch {};
+        thermite.terminal.writeAll(self.io, self.fd, "\x1b[?25h\x1b[?1049l") catch {};
         if (self.original_termios) |orig| {
             std.posix.tcsetattr(self.fd, .FLUSH, orig) catch {};
         }
-        std.posix.close(self.fd);
+        thermite.terminal.closeTty(self.io, self.fd);
     }
 
     /// Check for and consume resize event, returns new size if resized
@@ -1547,10 +1542,9 @@ const Terminal = struct {
         g_resize_pending = false;
 
         // Query new size
-        var size = std.posix.winsize{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-        _ = std.c.ioctl(self.fd, TIOCGWINSZ, @intFromPtr(&size));
-        const new_width: u32 = if (size.col > 0) size.col else 80;
-        const new_height: u32 = if (size.row > 0) size.row else 24;
+        const size = thermite.terminal.getCurrentSize(self.fd);
+        const new_width: u32 = if (size) |sz| sz.width else 80;
+        const new_height: u32 = if (size) |sz| sz.height else 24;
 
         if (new_width != self.width or new_height != self.height) {
             self.width = new_width;
@@ -1560,10 +1554,10 @@ const Terminal = struct {
         return null;
     }
 
-    pub fn waitForEvent(self: *const Terminal) void {
+    pub fn waitForEvent(self: *const Terminal, io: Io) void {
         _ = self;
         // TODO: proper poll
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
     }
 
     pub fn pollEvent(self: *const Terminal) ?Event {
@@ -1591,7 +1585,7 @@ const Terminal = struct {
     }
 
     pub fn present(self: *const Terminal, screen: *ScreenBuffer) !void {
-        _ = try std.posix.write(self.fd, screen.buffer[0..screen.len]);
+        try thermite.terminal.writeAll(self.io, self.fd, screen.buffer[0..screen.len]);
     }
 };
 

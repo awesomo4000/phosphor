@@ -41,7 +41,7 @@ pub const FastRenderer = struct {
             .term_width = width,
             .term_height = height,
             .allocator = allocator,
-            .output_buffer = std.ArrayList(u8){},
+            .output_buffer = .empty,
             .dirty_rows = dirty_rows,
         };
 

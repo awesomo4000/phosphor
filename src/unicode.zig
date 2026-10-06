@@ -5,38 +5,14 @@
 /// in terminals with Unicode content (emoji, CJK, combining marks, etc.).
 ///
 /// Usage:
-///   // Initialize once at app startup
-///   try phosphor.unicode.init(allocator);
-///   defer phosphor.unicode.deinit(allocator);
-///
-///   // Use anywhere without passing state around
 ///   const width = phosphor.unicode.strWidth("Hello 👨‍👩‍👧");  // returns 8
 ///
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-// Re-export zg DisplayWidth type for advanced usage
+// Re-export zg modules for advanced usage
 pub const DisplayWidth = @import("zg");
-
-/// Global DisplayWidth instance, initialized once.
-/// Thread-safe for reads after initialization.
-var global_dw: ?DisplayWidth = null;
-
-/// Initialize the Unicode display width calculator.
-/// Called automatically by the phosphor runtime - no need to call directly.
-pub fn init(allocator: Allocator) !void {
-    if (global_dw != null) return; // Already initialized
-    global_dw = try DisplayWidth.init(allocator);
-}
-
-/// Deinitialize and free resources.
-/// Called automatically by the phosphor runtime - no need to call directly.
-pub fn deinit(allocator: Allocator) void {
-    if (global_dw) |*dw| {
-        dw.deinit(allocator);
-    }
-    global_dw = null;
-}
+pub const Graphemes = @import("Graphemes");
 
 /// Returns the display width of a string in terminal columns.
 /// Handles grapheme clusters correctly (emoji ZWJ sequences, combining marks, etc.).
@@ -48,39 +24,14 @@ pub fn deinit(allocator: Allocator) void {
 ///   strWidth("café")         // 4
 ///   strWidth("cafe\u{0301}") // 4  (combining accent)
 ///   strWidth("你好")          // 4  (CJK, each char width 2)
-///
-/// Returns 0 if not initialized (fails gracefully).
 pub fn strWidth(str: []const u8) usize {
-    if (global_dw) |dw| {
-        return dw.strWidth(str);
-    }
-    // Fallback: assume 1 byte = 1 column (wrong for Unicode, but better than crashing)
-    return str.len;
+    return DisplayWidth.strWidth(str);
 }
 
 /// Returns the display width of a single Unicode codepoint.
 /// Returns: -1 for control chars, 0 for combining/zero-width, 1 or 2 for normal chars.
 pub fn codePointWidth(cp: u21) i4 {
-    if (global_dw) |dw| {
-        return dw.codePointWidth(cp);
-    }
-    // Fallback
-    if (cp < 32 or (cp >= 0x7F and cp < 0xA0)) return -1;
-    return 1;
-}
-
-/// Check if the module has been initialized.
-pub fn isInitialized() bool {
-    return global_dw != null;
-}
-
-/// Get direct access to the DisplayWidth instance for advanced usage.
-/// Returns null if not initialized.
-pub fn getDisplayWidth() ?*const DisplayWidth {
-    if (global_dw) |*dw| {
-        return dw;
-    }
-    return null;
+    return DisplayWidth.codePointWidth(cp);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -112,9 +63,8 @@ pub const Unicode = struct {
     /// Returns the number of graphemes (user-perceived characters).
     /// Note: O(n) - must iterate the entire string.
     pub fn len(self: Unicode) usize {
-        const dw = global_dw orelse return self.bytes.len;
         var count: usize = 0;
-        var iter = dw.graphemes.iterator(self.bytes);
+        var iter = Graphemes.iterator(self.bytes);
         while (iter.next()) |_| count += 1;
         return count;
     }
@@ -141,14 +91,13 @@ pub const Unicode = struct {
         const byte_pos = std.mem.indexOf(u8, self.bytes, needle) orelse return null;
 
         // Verify it's at a grapheme boundary and count grapheme index
-        const dw = global_dw orelse return null;
         var grapheme_idx: usize = 0;
-        var iter = dw.graphemes.iterator(self.bytes);
+        var iter = Graphemes.iterator(self.bytes);
 
         while (iter.next()) |g| {
             if (g.offset == byte_pos) {
                 // Check if the needle matches complete graphemes
-                var check_iter = dw.graphemes.iterator(self.bytes[byte_pos..]);
+                var check_iter = Graphemes.iterator(self.bytes[byte_pos..]);
                 var needle_byte_count: usize = 0;
                 while (check_iter.next()) |ng| {
                     needle_byte_count += ng.len;
@@ -183,14 +132,13 @@ pub const Unicode = struct {
         const byte_pos = std.mem.indexOf(u8, self.bytes, needle) orelse return null;
 
         // Verify it's at a grapheme boundary
-        const dw = global_dw orelse return byte_pos; // fallback: return byte pos anyway
-        var iter = dw.graphemes.iterator(self.bytes);
+        var iter = Graphemes.iterator(self.bytes);
 
         while (iter.next()) |g| {
             if (g.offset == byte_pos) {
                 // Also verify needle ends at grapheme boundary
                 const needle_end = byte_pos + needle.len;
-                var end_iter = dw.graphemes.iterator(self.bytes);
+                var end_iter = Graphemes.iterator(self.bytes);
                 while (end_iter.next()) |eg| {
                     if (eg.offset == needle_end or eg.offset + eg.len == needle_end) {
                         return byte_pos;
@@ -248,14 +196,7 @@ pub const Unicode = struct {
         pub fn next(self: *Iterator) ?Grapheme {
             if (self.pos >= self.bytes.len) return null;
 
-            const dw = global_dw orelse {
-                // Fallback: one byte = one grapheme (wrong but won't crash)
-                const g = Grapheme{ .offset = self.pos, .len = 1 };
-                self.pos += 1;
-                return g;
-            };
-
-            var iter = dw.graphemes.iterator(self.bytes[self.pos..]);
+            var iter = Graphemes.iterator(self.bytes[self.pos..]);
             if (iter.next()) |zg_grapheme| {
                 const g = Grapheme{
                     .offset = self.pos,
@@ -280,13 +221,7 @@ pub const Unicode = struct {
         pub fn next(self: *ReverseIterator) ?Grapheme {
             if (self.pos == 0) return null;
 
-            const dw = global_dw orelse {
-                // Fallback: one byte = one grapheme
-                self.pos -= 1;
-                return Grapheme{ .offset = self.pos, .len = 1 };
-            };
-
-            var iter = dw.graphemes.reverseIterator(self.bytes[0..self.pos]);
+            var iter = Graphemes.reverseIterator(self.bytes[0..self.pos]);
             if (iter.prev()) |zg_grapheme| {
                 self.pos = zg_grapheme.offset;
                 return Grapheme{
@@ -316,16 +251,12 @@ pub fn unicode(str: []const u8) Unicode {
 // ─────────────────────────────────────────────────────────────
 
 test "basic ASCII" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 5), strWidth("Hello"));
     try std.testing.expectEqual(@as(usize, 0), strWidth(""));
 }
 
 test "emoji" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // Simple emoji
     try std.testing.expectEqual(@as(usize, 8), strWidth("Hello 😊"));
@@ -338,8 +269,6 @@ test "emoji" {
 }
 
 test "CJK" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // Each CJK character is width 2
     try std.testing.expectEqual(@as(usize, 4), strWidth("你好"));
@@ -347,8 +276,6 @@ test "CJK" {
 }
 
 test "combining marks" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // café with combining acute accent
     try std.testing.expectEqual(@as(usize, 4), strWidth("cafe\u{0301}"));
@@ -364,8 +291,6 @@ test "fallback when not initialized" {
 }
 
 test "variation selectors" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // Heart with text presentation (VS15) = width 1
     try std.testing.expectEqual(@as(usize, 1), strWidth("\u{2764}\u{FE0E}"));
@@ -374,8 +299,6 @@ test "variation selectors" {
 }
 
 test "flags (regional indicators)" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // Flag emoji (two regional indicator letters = one flag, width 2)
     try std.testing.expectEqual(@as(usize, 2), strWidth("🇺🇸"));
@@ -383,8 +306,6 @@ test "flags (regional indicators)" {
 }
 
 test "mixed content" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // ASCII + emoji + CJK: "Hi " (3) + "😊" (2) + " " (1) + "你好" (4) = 10
     try std.testing.expectEqual(@as(usize, 10), strWidth("Hi 😊 你好"));
@@ -393,8 +314,6 @@ test "mixed content" {
 }
 
 test "whitespace and control" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // Spaces
     try std.testing.expectEqual(@as(usize, 3), strWidth("   "));
@@ -407,8 +326,6 @@ test "whitespace and control" {
 }
 
 test "codePointWidth" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     // ASCII
     try std.testing.expectEqual(@as(i4, 1), codePointWidth('A'));
@@ -426,8 +343,6 @@ test "codePointWidth" {
 // ─────────────────────────────────────────────────────────────
 
 test "Unicode.len and width" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const u = unicode("Hello 👨‍👩‍👧");
     try std.testing.expectEqual(@as(usize, 7), u.len()); // 6 ASCII + 1 family emoji
@@ -439,8 +354,6 @@ test "Unicode.len and width" {
 }
 
 test "Unicode.find basic" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const u = unicode("Hello world");
 
@@ -457,8 +370,6 @@ test "Unicode.find basic" {
 }
 
 test "Unicode.find with emoji" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const u = unicode("Hi 😊 there");
 
@@ -469,8 +380,6 @@ test "Unicode.find with emoji" {
 }
 
 test "Unicode.find ZWJ sequence - should not match partial" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const family = "👨‍👩‍👧"; // family emoji (ZWJ sequence)
     const u = unicode(family);
@@ -485,8 +394,6 @@ test "Unicode.find ZWJ sequence - should not match partial" {
 }
 
 test "Unicode.find combining marks - should not match partial" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const cafe = "cafe\u{0301}"; // café with combining acute (c-a-f-é as 4 graphemes)
     const u = unicode(cafe);
@@ -504,8 +411,6 @@ test "Unicode.find combining marks - should not match partial" {
 }
 
 test "Unicode.find at end" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const u = unicode("Hello");
     try std.testing.expectEqual(@as(?usize, 4), u.find("o"));
@@ -513,8 +418,6 @@ test "Unicode.find at end" {
 }
 
 test "Unicode.contains" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const u = unicode("Hello 👨‍👩‍👧 world");
 
@@ -526,8 +429,6 @@ test "Unicode.contains" {
 }
 
 test "Unicode.iterator" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const text = "Hi👋";
     const u = unicode(text);
@@ -550,8 +451,6 @@ test "Unicode.iterator" {
 }
 
 test "Unicode.reverseIterator" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const text = "Hi👋";
     const u = unicode(text);
@@ -574,8 +473,6 @@ test "Unicode.reverseIterator" {
 }
 
 test "Unicode.at" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const text = "A😊B";
     const u = unicode(text);
@@ -595,8 +492,6 @@ test "Unicode.at" {
 }
 
 test "Unicode.collect" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const text = "A👨‍👩‍👧B";
     const u = unicode(text);
@@ -610,8 +505,6 @@ test "Unicode.collect" {
 }
 
 test "Unicode with flags" {
-    try init(std.testing.allocator);
-    defer deinit(std.testing.allocator);
 
     const flags = "🇺🇸🇪🇸";
     const u = unicode(flags);

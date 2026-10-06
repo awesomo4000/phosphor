@@ -21,7 +21,7 @@ pub const LogView = struct {
     pub fn init(allocator: Allocator, capacity: usize) LogView {
         return .{
             .allocator = allocator,
-            .lines = .{},
+            .lines = .empty,
             .capacity = capacity,
         };
     }

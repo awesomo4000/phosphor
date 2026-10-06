@@ -61,7 +61,7 @@ const zoom_targets = [_]ZoomTarget{
 };
 
 /// Draw status bar at bottom of screen
-fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused: bool, target_name: []const u8, zoom: f64) void {
+fn drawStatusBar(io: std.Io, fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused: bool, target_name: []const u8, zoom: f64) void {
     // Skip if terminal too small
     if (term_width < 20 or term_height < 5) return;
 
@@ -69,7 +69,7 @@ fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused
 
     // Move to bottom row, set white on black
     const prefix = std.fmt.bufPrint(&buf, "\x1b[{};1H\x1b[0m\x1b[97;40m", .{term_height}) catch return;
-    _ = std.posix.write(fd, prefix) catch {};
+    terminal.writeAll(io, fd, prefix) catch {};
 
     // Build status text - use shorter format for narrow terminals
     // Fixed widths: FPS=3 digits, Zoom=9 chars (e.g. "1.23e-04")
@@ -89,27 +89,26 @@ fn drawStatusBar(fd: i32, term_height: u32, term_width: u32, fps: u32, is_paused
 
     // Truncate to terminal width and write
     const write_len = @min(status.len, term_width);
-    _ = std.posix.write(fd, status[0..write_len]) catch {};
+    terminal.writeAll(io, fd, status[0..write_len]) catch {};
 
     // Fill rest of line with spaces
     if (term_width > write_len) {
         var spaces: [200]u8 = undefined;
         const fill_len = @min(term_width - @as(u32, @intCast(write_len)), 200);
         @memset(spaces[0..fill_len], ' ');
-        _ = std.posix.write(fd, spaces[0..fill_len]) catch {};
+        terminal.writeAll(io, fd, spaces[0..fill_len]) catch {};
     }
 
     // Reset colors
-    _ = std.posix.write(fd, "\x1b[0m") catch {};
+    terminal.writeAll(io, fd, "\x1b[0m") catch {};
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Initialize renderer
-    const renderer = try lib.Renderer.init(allocator);
+    const renderer = try lib.Renderer.init(allocator, io, init.environ_map);
     defer renderer.deinit();
 
     // Install signal handlers for clean Ctrl+C exit
@@ -137,7 +136,7 @@ pub fn main() !void {
     // FPS tracking
     var fps: u32 = 0;
     var fps_frame_count: u32 = 0;
-    var fps_last_time = std.time.milliTimestamp();
+    var fps_last_time = std.Io.Timestamp.now(io, .awake).toMilliseconds();
 
 
     const term_fd = renderer.getTerminalFd();
@@ -167,7 +166,7 @@ pub fn main() !void {
         }
 
         // Update FPS counter
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(io, .awake).toMilliseconds();
         if (now - fps_last_time >= 1000) {
             fps = fps_frame_count;
             fps_frame_count = 0;
@@ -176,14 +175,14 @@ pub fn main() !void {
 
         // If paused, update status bar (20Hz due to 50ms sleep) and continue
         if (is_paused) {
-            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            drawStatusBar(io, term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
+            io.sleep(.fromMilliseconds(50), .awake) catch {};
             continue;
         }
 
         // Update status bar every 7 frames (~10 Hz at 70fps)
         if (frame % 7 == 0) {
-            drawStatusBar(term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
+            drawStatusBar(io, term_fd, term_height, term_width, fps, is_paused, current_target.name, zoom);
         }
 
         // Count this frame
@@ -231,7 +230,7 @@ pub fn main() !void {
         if (frame % 20 == 0 and max_iter < 256) max_iter += 8;
 
         // Frame timing
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        io.sleep(.fromMilliseconds(5), .awake) catch {};
 
         // Exit after exploring all targets twice
         if (frame >= zoom_targets.len * 2 * 500) break;

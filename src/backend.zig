@@ -183,12 +183,12 @@ fn readKeyAsEvent() !?Event {
         return .{ .resize = .{ .cols = new_size.cols, .rows = new_size.rows } };
     }
 
-    const stdin = std.fs.File.stdin();
+    const stdin = std.posix.STDIN_FILENO;
     const posix = std.posix;
 
     // Poll for input with 16ms timeout (~60fps responsiveness)
     var pfd = [_]posix.pollfd{.{
-        .fd = stdin.handle,
+        .fd = stdin,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
@@ -211,7 +211,7 @@ fn readKeyAsEvent() !?Event {
     }
 
     var buf: [1]u8 = undefined;
-    _ = try stdin.read(&buf);
+    _ = try std.posix.read(stdin, &buf);
     const c = buf[0];
 
     // Control characters
@@ -249,11 +249,11 @@ fn readKeyAsEvent() !?Event {
     return .{ .key = .{ .unknown = c } };
 }
 
-fn readEscapeSequence(stdin: std.fs.File) !?Event {
+fn readEscapeSequence(stdin: std.posix.fd_t) !?Event {
     const posix = std.posix;
 
     var pfd = [_]posix.pollfd{.{
-        .fd = stdin.handle,
+        .fd = stdin,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
@@ -264,15 +264,15 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
     }
 
     var buf: [1]u8 = undefined;
-    _ = try stdin.read(&buf);
+    _ = try std.posix.read(stdin, &buf);
 
     if (buf[0] == '[') {
-        _ = try stdin.read(&buf);
+        _ = try std.posix.read(stdin, &buf);
 
         // Check for bracketed paste
         if (buf[0] == '2') {
             var seq: [3]u8 = undefined;
-            _ = try stdin.read(&seq);
+            _ = try std.posix.read(stdin, &seq);
             if (seq[0] == '0' and seq[1] == '0' and seq[2] == '~') {
                 return .paste_start;
             }
@@ -289,15 +289,15 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
             'H' => .home,
             'F' => .end,
             '3' => blk: {
-                _ = try stdin.read(&buf);
+                _ = try std.posix.read(stdin, &buf);
                 if (buf[0] == '~') break :blk .delete;
                 break :blk .{ .unknown = buf[0] };
             },
             '1' => blk: {
-                _ = try stdin.read(&buf);
+                _ = try std.posix.read(stdin, &buf);
                 if (buf[0] == ';') {
-                    _ = try stdin.read(&buf); // modifier
-                    _ = try stdin.read(&buf); // direction
+                    _ = try std.posix.read(stdin, &buf); // modifier
+                    _ = try std.posix.read(stdin, &buf); // direction
                     if (buf[0] == 'C') break :blk .ctrl_right;
                     if (buf[0] == 'D') break :blk .ctrl_left;
                 }
@@ -308,7 +308,7 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
     }
 
     if (buf[0] == 'O') {
-        _ = try stdin.read(&buf);
+        _ = try std.posix.read(stdin, &buf);
         return .{ .key = switch (buf[0]) {
             'H' => .home,
             'F' => .end,
@@ -324,13 +324,13 @@ fn readEscapeSequence(stdin: std.fs.File) !?Event {
     return .{ .key = .{ .unknown = buf[0] } };
 }
 
-fn readUtf8Event(stdin: std.fs.File, first_byte: u8) !?Event {
+fn readUtf8Event(stdin: std.posix.fd_t, first_byte: u8) !?Event {
     const len: usize = if (first_byte & 0xF0 == 0xF0) 4 else if (first_byte & 0xE0 == 0xE0) 3 else if (first_byte & 0xC0 == 0xC0) 2 else return .{ .key = .{ .unknown = first_byte } };
 
     var utf8_buf: [4]u8 = undefined;
     utf8_buf[0] = first_byte;
 
-    const bytes_read = try stdin.read(utf8_buf[1..len]);
+    const bytes_read = try std.posix.read(stdin, utf8_buf[1..len]);
     if (bytes_read != len - 1) {
         return .{ .key = .{ .unknown = first_byte } };
     }
@@ -373,7 +373,7 @@ pub const MemoryBackend = struct {
             .height = height,
             .cursor_x = 0,
             .cursor_y = 0,
-            .event_queue = .{},
+            .event_queue = .empty,
             .allocator = allocator,
         };
     }
@@ -413,7 +413,7 @@ pub const MemoryBackend = struct {
     pub fn getLine(self: *const MemoryBackend, y: u16, allocator: std.mem.Allocator) ![]u8 {
         if (y >= self.height) return try allocator.alloc(u8, 0);
 
-        var result: std.ArrayListUnmanaged(u8) = .{};
+        var result: std.ArrayListUnmanaged(u8) = .empty;
         defer result.deinit(allocator);
 
         for (self.cells[y]) |cell| {
@@ -499,10 +499,10 @@ pub const ThermiteBackend = struct {
     current_fg: u32,
     current_bg: u32,
 
-    pub fn init(allocator: std.mem.Allocator) !ThermiteBackend {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) !ThermiteBackend {
         const tui = @import("tui.zig");
 
-        const renderer = try ThermiteRenderer.init(allocator);
+        const renderer = try ThermiteRenderer.init(allocator, io, env);
 
         // Install resize handler for SIGWINCH
         tui.installResizeHandler();
@@ -610,17 +610,17 @@ pub const ThermiteBackend = struct {
                     // Move terminal cursor to the stored position
                     var buf: [32]u8 = undefined;
                     const seq = std.fmt.bufPrint(&buf, "\x1b[{};{}H", .{ self.cursor_y + 1, self.cursor_x + 1 }) catch return;
-                    _ = std.posix.write(self.renderer.ttyfd, seq) catch {};
+                    thermite.terminal.writeAll(self.renderer.io, self.renderer.ttyfd, seq) catch {};
                 },
                 .show_cursor => |vis| {
                     // Position terminal cursor at stored position before showing/hiding
                     // This ensures cursor appears at the right place, not wherever terminal left it
                     var pos_buf: [32]u8 = undefined;
                     const pos_seq = std.fmt.bufPrint(&pos_buf, "\x1b[{};{}H", .{ self.cursor_y + 1, self.cursor_x + 1 }) catch return;
-                    _ = std.posix.write(self.renderer.ttyfd, pos_seq) catch {};
+                    thermite.terminal.writeAll(self.renderer.io, self.renderer.ttyfd, pos_seq) catch {};
 
                     const cursor_seq = if (vis.visible) "\x1b[?25h" else "\x1b[?25l";
-                    _ = std.posix.write(self.renderer.ttyfd, cursor_seq) catch {};
+                    thermite.terminal.writeAll(self.renderer.io, self.renderer.ttyfd, cursor_seq) catch {};
                 },
                 else => {},
             }

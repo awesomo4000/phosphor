@@ -22,3 +22,6 @@ Thumbs.db
 # Project specific
 repl_history.txt
 x/
+
+# Zig 0.17 package cache (fetched dependencies)
+zig-pkg/
