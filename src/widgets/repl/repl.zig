@@ -107,17 +107,23 @@ pub const Repl = struct {
                 return .redraw;
             },
             .up => {
-                if (self.history.previous()) |text| {
+                // Multi-line: move cursor up
+                // Single-line: navigate history
+                if (self.buffer.lineCount() > 1) {
+                    _ = self.buffer.moveToPrevLine();
+                } else if (self.history.previous()) |text| {
                     try self.buffer.setText(text);
                 }
                 return .redraw;
             },
             .down => {
-                // Only change text if actively navigating history
-                if (self.history.next()) |text| {
+                // Multi-line: move cursor down
+                // Single-line: navigate history (if navigating)
+                if (self.buffer.lineCount() > 1) {
+                    _ = self.buffer.moveToNextLine();
+                } else if (self.history.next()) |text| {
                     try self.buffer.setText(text);
                 }
-                // Don't clear when reaching end - keep current input
                 return .redraw;
             },
             .ctrl_a => {

@@ -379,6 +379,59 @@ pub const LineBuffer = struct {
         }
         return col;
     }
+
+    /// Byte at logical position (skipping the gap)
+    fn byteAt(self: *const LineBuffer, pos: usize) u8 {
+        if (pos < self.gap_start) return self.buffer[pos];
+        return self.buffer[self.gap_end + (pos - self.gap_start)];
+    }
+
+    /// Logical position of the start of the line containing pos
+    fn lineStartBefore(self: *const LineBuffer, pos: usize) usize {
+        var i = pos;
+        while (i > 0) : (i -= 1) {
+            if (self.byteAt(i - 1) == '\n') return i;
+        }
+        return 0;
+    }
+
+    /// Logical position of the end of the line containing pos (at its newline or buffer end)
+    fn lineEndAfter(self: *const LineBuffer, pos: usize) usize {
+        const total = self.len();
+        var i = pos;
+        while (i < total) : (i += 1) {
+            if (self.byteAt(i) == '\n') return i;
+        }
+        return total;
+    }
+
+    /// Move cursor to line_start + col, clamped to the line end and backed off any UTF-8 continuation bytes
+    fn moveToColumn(self: *LineBuffer, line_start: usize, col: usize) void {
+        const line_end = self.lineEndAfter(line_start);
+        var target = @min(line_start + col, line_end);
+        while (target > line_start and target < line_end and (self.byteAt(target) & 0xC0) == 0x80) target -= 1;
+        self.moveCursorTo(target);
+    }
+
+    /// Move cursor to next line, preserving column if possible
+    /// Returns true if moved, false if already on last line
+    pub fn moveToNextLine(self: *LineBuffer) bool {
+        const col = self.currentColumn();
+        const line_end = self.lineEndAfter(self.gap_start);
+        if (line_end >= self.len()) return false;
+        self.moveToColumn(line_end + 1, col);
+        return true;
+    }
+
+    /// Move cursor to previous line, preserving column if possible
+    /// Returns true if moved, false if already on first line
+    pub fn moveToPrevLine(self: *LineBuffer) bool {
+        const col = self.currentColumn();
+        const line_start = self.lineStartBefore(self.gap_start);
+        if (line_start == 0) return false;
+        self.moveToColumn(self.lineStartBefore(line_start - 1), col);
+        return true;
+    }
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -396,6 +449,18 @@ test "basic insert and get" {
     try std.testing.expectEqualStrings("hello", text);
     try std.testing.expectEqual(@as(usize, 5), buf.len());
     try std.testing.expectEqual(@as(usize, 5), buf.cursor());
+
+    // Down onto a shorter last line clamps to buffer end
+    try buf.setText("abcdef\nxy");
+    buf.moveCursorTo(5);
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 9), buf.cursor());
+
+    // Column landing inside a multi-byte char backs off to its start
+    try buf.setText("abc\n\u{e9}\u{e9}");
+    buf.moveCursorTo(1);
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 4), buf.cursor());
 }
 
 test "insert at cursor" {
@@ -482,4 +547,50 @@ test "setText" {
     defer std.testing.allocator.free(text);
 
     try std.testing.expectEqualStrings("new text", text);
+}
+
+test "vertical line movement" {
+    var buf = try LineBuffer.init(std.testing.allocator);
+    defer buf.deinit();
+
+    try buf.insert("abcd\nef\nghij");
+
+    // From end of last line (col 4), up clamps to end of short line
+    try std.testing.expect(buf.moveToPrevLine());
+    try std.testing.expectEqual(@as(usize, 7), buf.cursor());
+
+    // Up again lands at col 2 of first line
+    try std.testing.expect(buf.moveToPrevLine());
+    try std.testing.expectEqual(@as(usize, 2), buf.cursor());
+
+    // Already on first line
+    try std.testing.expect(!buf.moveToPrevLine());
+    try std.testing.expectEqual(@as(usize, 2), buf.cursor());
+
+    // Down preserves column
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 7), buf.cursor());
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 10), buf.cursor());
+
+    // Already on last line
+    try std.testing.expect(!buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 10), buf.cursor());
+
+    // Cursor at start of a line (directly after a newline) moves up one line only
+    buf.moveCursorTo(8);
+    try std.testing.expect(buf.moveToPrevLine());
+    try std.testing.expectEqual(@as(usize, 5), buf.cursor());
+
+    // Down onto a shorter last line clamps to buffer end
+    try buf.setText("abcdef\nxy");
+    buf.moveCursorTo(5);
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 9), buf.cursor());
+
+    // Column landing inside a multi-byte char backs off to its start
+    try buf.setText("abc\n\u{e9}\u{e9}");
+    buf.moveCursorTo(1);
+    try std.testing.expect(buf.moveToNextLine());
+    try std.testing.expectEqual(@as(usize, 4), buf.cursor());
 }
