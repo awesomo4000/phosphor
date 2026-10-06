@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Phosphor logo: cel-shaded retro CRT terminal with a glowing green-phosphor face.
+  Keyed on magenta (#FF00FF) because the art itself is phosphor green.
+  Render: doc/logo/render.sh phosphor
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Unit 4-point sparkle, scaled per use -->
+    <path id="sparkle" d="M0,-1 Q0.16,-0.16 1,0 Q0.16,0.16 0,1 Q-0.16,0.16 -1,0 Q-0.16,-0.16 0,-1 Z"/>
+
+    <rect id="housingBack" x="232" y="214" width="600" height="500" rx="72"/>
+    <rect id="housingFront" x="182" y="250" width="600" height="500" rx="72"/>
+    <rect id="screen" x="252" y="314" width="460" height="296" rx="46"/>
+    <clipPath id="screenClip"><use href="#screen"/></clipPath>
+    <clipPath id="frontClip"><use href="#housingFront"/></clipPath>
+
+    <path id="antennaL" d="M430,262 L338,118"/>
+    <path id="antennaR" d="M548,262 L652,100"/>
+  </defs>
+
+  <!-- ===== Bold outer outline pass ===== -->
+  <g fill="#1b0d14" stroke="#1b0d14" stroke-width="40" stroke-linejoin="round" stroke-linecap="round">
+    <use href="#antennaL" fill="none" stroke-width="58"/>
+    <use href="#antennaR" fill="none" stroke-width="58"/>
+    <circle cx="338" cy="118" r="30"/>
+    <circle cx="652" cy="100" r="30"/>
+    <use href="#housingBack"/>
+    <use href="#housingFront"/>
+    <rect x="420" y="740" width="124" height="62"/>
+    <rect x="322" y="786" width="320" height="56" rx="26"/>
+    <use href="#sparkle" transform="translate(96,318) scale(40)" stroke-width="0.600"/>
+    <use href="#sparkle" transform="translate(910,214) scale(50)" stroke-width="0.480"/>
+    <use href="#sparkle" transform="translate(912,590) scale(32)" stroke-width="0.750"/>
+    <use href="#sparkle" transform="translate(122,600) scale(30)" stroke-width="0.800"/>
+    <use href="#sparkle" transform="translate(220,170) scale(28)" stroke-width="0.857"/>
+    <use href="#sparkle" transform="translate(790,92) scale(24)" stroke-width="1.000"/>
+  </g>
+
+  <!-- ===== Antennae with glowing tips ===== -->
+  <g fill="none" stroke-linecap="round">
+    <use href="#antennaL" stroke="#1b0d14" stroke-width="32"/>
+    <use href="#antennaR" stroke="#1b0d14" stroke-width="32"/>
+    <use href="#antennaL" stroke="#e9dcc0" stroke-width="16"/>
+    <use href="#antennaR" stroke="#e9dcc0" stroke-width="16"/>
+  </g>
+  <g stroke="#1b0d14" stroke-width="10">
+    <circle cx="338" cy="118" r="30" fill="#7dffb0"/>
+    <circle cx="652" cy="100" r="30" fill="#7dffb0"/>
+  </g>
+  <circle cx="328" cy="108" r="11" fill="#effff5"/>
+  <circle cx="642" cy="90" r="11" fill="#effff5"/>
+
+  <!-- ===== Stand ===== -->
+  <g stroke="#1b0d14" stroke-width="10" stroke-linejoin="round">
+    <rect x="420" y="740" width="124" height="62" fill="#a8956f"/>
+    <rect x="322" y="786" width="320" height="56" rx="26" fill="#e9dcc0"/>
+  </g>
+  <path d="M338,822 L626,822 C620,832 612,838 600,838 L364,838 C352,838 344,832 338,822 Z" fill="#c4b18c"/>
+
+  <!-- ===== Housing: extruded back, then front face ===== -->
+  <use href="#housingBack" fill="#b5a27c" stroke="#1b0d14" stroke-width="10"/>
+  <use href="#housingFront" fill="#e9dcc0"/>
+  <g clip-path="url(#frontClip)">
+    <!-- right-side core shadow -->
+    <path d="M730,240 C770,400 770,600 720,770 L800,770 L800,240 Z" fill="#c9b690"/>
+    <!-- bottom shadow band -->
+    <path d="M170,712 C350,698 600,698 800,712 L800,770 L170,770 Z" fill="#c9b690"/>
+    <!-- top-left rim light -->
+    <path d="M210,330 C214,290 240,268 280,264 L520,264 C380,276 260,286 222,372 Z" fill="#fff8ea"/>
+  </g>
+  <use href="#housingFront" fill="none" stroke="#1b0d14" stroke-width="10"/>
+
+  <!-- ===== Screen bezel and glass ===== -->
+  <rect x="226" y="290" width="512" height="346" rx="58" fill="#b5a27c" stroke="#1b0d14" stroke-width="10"/>
+  <use href="#screen" fill="#0c2418" stroke="#1b0d14" stroke-width="10"/>
+  <g clip-path="url(#screenClip)">
+    <!-- phosphor bloom: flat cel rings toward the center -->
+    <ellipse cx="482" cy="462" rx="210" ry="130" fill="#103a26"/>
+    <ellipse cx="482" cy="462" rx="150" ry="92" fill="#14492f"/>
+
+    <!-- tiny prompt in the corner -->
+    <g fill="#3fbf7a">
+      <path d="M282,346 L304,358 L282,370 L282,362 L290,358 L282,354 Z"/>
+      <rect x="312" y="364" width="22" height="6"/>
+    </g>
+
+    <!-- face glow halos -->
+    <g fill="#2f9e63">
+      <rect x="378" y="384" width="74" height="114" rx="20"/>
+      <rect x="512" y="384" width="74" height="114" rx="20"/>
+    </g>
+    <!-- eyes -->
+    <g fill="#8dffbe">
+      <rect x="392" y="398" width="46" height="86" rx="10"/>
+      <rect x="526" y="398" width="46" height="86" rx="10"/>
+    </g>
+    <g fill="#effff5">
+      <rect x="400" y="408" width="14" height="26" rx="4"/>
+      <rect x="534" y="408" width="14" height="26" rx="4"/>
+    </g>
+
+    <!-- pixel smile, with its own glow -->
+    <g fill="#2f9e63">
+      <rect x="390" y="506" width="38" height="38"/>
+      <rect x="414" y="530" width="38" height="38"/>
+      <rect x="438" y="542" width="110" height="38"/>
+      <rect x="512" y="530" width="38" height="38"/>
+      <rect x="536" y="506" width="38" height="38"/>
+    </g>
+    <g fill="#8dffbe">
+      <rect x="396" y="512" width="26" height="26"/>
+      <rect x="420" y="536" width="26" height="26"/>
+      <rect x="444" y="548" width="26" height="26"/>
+      <rect x="468" y="548" width="26" height="26"/>
+      <rect x="492" y="548" width="26" height="26"/>
+      <rect x="516" y="536" width="26" height="26"/>
+      <rect x="540" y="512" width="26" height="26"/>
+    </g>
+
+    <!-- blinking block cursor -->
+    <rect x="612" y="548" width="22" height="26" fill="#8dffbe"/>
+
+    <!-- scanlines -->
+    <g fill="#000000" opacity="0.22">
+      <rect x="250" y="320" width="470" height="4"/>
+      <rect x="250" y="334" width="470" height="4"/>
+      <rect x="250" y="348" width="470" height="4"/>
+      <rect x="250" y="362" width="470" height="4"/>
+      <rect x="250" y="376" width="470" height="4"/>
+      <rect x="250" y="390" width="470" height="4"/>
+      <rect x="250" y="404" width="470" height="4"/>
+      <rect x="250" y="418" width="470" height="4"/>
+      <rect x="250" y="432" width="470" height="4"/>
+      <rect x="250" y="446" width="470" height="4"/>
+      <rect x="250" y="460" width="470" height="4"/>
+      <rect x="250" y="474" width="470" height="4"/>
+      <rect x="250" y="488" width="470" height="4"/>
+      <rect x="250" y="502" width="470" height="4"/>
+      <rect x="250" y="516" width="470" height="4"/>
+      <rect x="250" y="530" width="470" height="4"/>
+      <rect x="250" y="544" width="470" height="4"/>
+      <rect x="250" y="558" width="470" height="4"/>
+      <rect x="250" y="572" width="470" height="4"/>
+      <rect x="250" y="586" width="470" height="4"/>
+      <rect x="250" y="600" width="470" height="4"/>
+    </g>
+
+    <!-- curved glass glare (flat cel shapes) -->
+    <path d="M270,400 C272,350 300,326 352,322 L452,322 C360,334 300,352 286,420 Z" fill="#ffffff" opacity="0.16"/>
+    <path d="M674,520 C676,560 664,586 636,594 C660,576 668,552 668,520 Z" fill="#ffffff" opacity="0.14"/>
+  </g>
+
+  <!-- ===== Control strip ===== -->
+  <g stroke="#1b0d14" stroke-width="8">
+    <circle cx="276" cy="690" r="13" fill="#7dffb0"/>
+    <circle cx="640" cy="690" r="22" fill="#a8956f"/>
+    <circle cx="700" cy="690" r="22" fill="#a8956f"/>
+  </g>
+  <rect x="636" y="672" width="8" height="16" rx="3" fill="#1b0d14"/>
+  <rect x="696" y="672" width="8" height="16" rx="3" fill="#1b0d14"/>
+  <circle cx="272" cy="686" r="4" fill="#effff5"/>
+  <g fill="#1b0d14">
+    <rect x="330" y="682" width="70" height="12" rx="6"/>
+    <rect x="414" y="682" width="70" height="12" rx="6"/>
+    <rect x="498" y="682" width="70" height="12" rx="6"/>
+  </g>
+
+  <!-- ===== Glimmer sparkles ===== -->
+  <g stroke="#1b0d14" stroke-linejoin="round">
+    <use href="#sparkle" transform="translate(96,318) scale(40)" stroke-width="0.200" fill="#8dffbe"/>
+    <use href="#sparkle" transform="translate(910,214) scale(50)" stroke-width="0.160" fill="#effff5"/>
+    <use href="#sparkle" transform="translate(912,590) scale(32)" stroke-width="0.250" fill="#8dffbe"/>
+    <use href="#sparkle" transform="translate(122,600) scale(30)" stroke-width="0.267" fill="#effff5"/>
+    <use href="#sparkle" transform="translate(220,170) scale(28)" stroke-width="0.286" fill="#effff5"/>
+    <use href="#sparkle" transform="translate(790,92) scale(24)" stroke-width="0.333" fill="#8dffbe"/>
+  </g>
+</svg>
