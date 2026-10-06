@@ -35,6 +35,9 @@ pub const Repl = struct {
     history: History,
     segments: std.ArrayListUnmanaged(Segment),
     in_paste: bool,
+    // Last submitted text, kept alive until the next submit so dispatched
+    // messages can reference it after the buffer is cleared
+    submitted: std.ArrayListUnmanaged(u8) = .empty,
 
     // Configuration
     config: Config,
@@ -63,6 +66,7 @@ pub const Repl = struct {
         self.buffer.deinit();
         self.history.deinit();
         self.segments.deinit(self.allocator);
+        self.submitted.deinit(self.allocator);
     }
 
     /// Declare what events this widget wants to receive.
@@ -384,11 +388,13 @@ pub const Repl = struct {
         return switch (action) {
             .none, .redraw => .none,
             .submit => blk: {
-                // getTextSlice only works when cursor at end; fall back to getText
-                const text_slice = self.buffer.getTextSlice();
-                const text_alloc = if (text_slice == null) self.buffer.getText(self.allocator) catch "" else null;
-                defer if (text_alloc) |t| self.allocator.free(t);
-                const text = text_slice orelse text_alloc.?;
+                // Copy into Repl-owned storage: the dispatched message is handled
+                // after this returns, so the text must outlive the buffer clear
+                const parts = self.buffer.getTextParts();
+                self.submitted.clearRetainingCapacity();
+                try self.submitted.appendSlice(self.allocator, parts.before);
+                try self.submitted.appendSlice(self.allocator, parts.after);
+                const text = self.submitted.items;
 
                 // Add to history and clear buffer
                 if (text.len > 0) {
@@ -1165,6 +1171,36 @@ test "getText works correctly when cursor is in middle" {
     const parts = repl.buffer.getTextParts();
     try std.testing.expectEqualStrings("hel", parts.before);
     try std.testing.expectEqualStrings("lo", parts.after);
+}
+
+test "handleKeyEffect submit text outlives buffer clear" {
+    const Msg = union(enum) {
+        submitted: []const u8,
+        cancelled,
+        eof,
+
+        fn onSubmit(text: []const u8) @This() {
+            return .{ .submitted = text };
+        }
+    };
+
+    var repl = try Repl.init(std.testing.allocator, .{});
+    defer repl.deinit();
+
+    // Submit with the cursor mid-buffer, which previously freed the text early
+    try repl.buffer.insert("abc\nde");
+    repl.buffer.moveCursorTo(2);
+
+    const effect = try repl.handleKeyEffect(.enter, Msg, .{
+        .on_submit = Msg.onSubmit,
+        .on_cancel = .cancelled,
+        .on_eof = .eof,
+    });
+
+    // Typing after submit must not disturb the dispatched text
+    try repl.buffer.insert("xyz");
+
+    try std.testing.expectEqualStrings("abc\nde", effect.dispatch.submitted);
 }
 
 test "view generates draw commands" {
